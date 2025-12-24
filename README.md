@@ -282,7 +282,7 @@ The security implementation ensures proper authentication and authorization:
 
 ```powershell
 # Method 1: Direct download and execution
-irm https://raw.githubusercontent.com/paulmann/1st-Remote-Session-Manager-Pro/refs/heads/main/1st-Remote-Session-Manager-Pro.ps1 -OutFile RemoteSessionManager.ps1
+irm https://raw.githubusercontent.com/paulmann/1st-Remote-Session-Manager-Pro/refs/heads/main/1st-Remote-Session-Manager-Pro.ps1 -OutFile 1st-Remote-Session-Manager-Pro.ps1
 
 # Method 2: Clone repository
 git clone https://github.com/paulmann/1st-Remote-Session-Manager-Pro.git
