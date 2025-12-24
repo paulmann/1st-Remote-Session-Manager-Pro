@@ -85,7 +85,7 @@ param(
 # ============================================================================
 
 # Script metadata
-$SCRIPT_NAME = "RemoteSessionManagerPro"
+$SCRIPT_NAME = "1st-Remote-Session-Manager-Pro"
 $SCRIPT_VERSION = "1.0.0"
 $SCRIPT_AUTHOR = "Mikhail Deynekin"
 $GITHUB_REPO = "https://raw.githubusercontent.com/paulmann/1st-Remote-Session-Manager-Pro"
