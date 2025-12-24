@@ -424,134 +424,12 @@ function Enable-RDPShadowing {
     }
 }
 
-function Get-RDPSessions {
-    <#
-    .SYNOPSIS
-        Retrieves RDP sessions with universal parsing for all Windows locales and PowerShell versions
-    
-    .DESCRIPTION
-        Advanced session enumeration supporting:
-        - All Windows locales (English, Russian, German, French, Spanish, etc.)
-        - PowerShell 5.1 through 7+
-        - Multiple fallback methods with intelligent detection
-        - Extended client information
-        - Performance optimizations for PS7+
-    
-    .PARAMETER ComputerName
-        Target computer name (default: local computer)
-    
-    .PARAMETER ExtendedInfo
-        Include extended client information (IP, hostname)
-    
-    .PARAMETER ActiveOnly
-        Return only active/connected sessions
-    
-    .PARAMETER RawOutput
-        Return raw session objects without formatting
-    
-    .EXAMPLE
-        Get-RDPSessions
-        # List all sessions on local computer
-    
-    .EXAMPLE
-        Get-RDPSessions -ComputerName "SERVER01" -ActiveOnly
-        # List active sessions on remote server
-    
-    .EXAMPLE
-        Get-RDPSessions -ExtendedInfo -RawOutput | Export-Csv "sessions.csv"
-        # Export detailed session information
-    
-    .OUTPUTS
-        PSCustomObject[] with session properties
-    #>
-    
-    [CmdletBinding()]
-    param(
-        [Parameter()]
-        [string]$ComputerName = $env:COMPUTERNAME,
-        
-        [Parameter()]
-        [switch]$ExtendedInfo,
-        
-        [Parameter()]
-        [switch]$ActiveOnly,
-        
-        [Parameter()]
-        [switch]$RawOutput
-    )
-    
-    begin {
-        Write-DebugLog "Retrieving RDP sessions from $ComputerName..." "INFO" @{
-            ComputerName = $ComputerName
-            ExtendedInfo = $ExtendedInfo
-            ActiveOnly = $ActiveOnly
-            PowerShellVersion = $PSVersionTable.PSVersion
-            Culture = [System.Threading.Thread]::CurrentThread.CurrentCulture.Name
-        }
-        
-        # Determine if running in PowerShell 7+
-        $IsPS7Plus = $PSVersionTable.PSVersion.Major -ge 7
-        
-        # Cache for quick access to states
-        $activeStates = @("Active", "Conn", "Connected")
-        
-        # Dictionary for state normalization
-        $stateNormalization = @{
-            # English and other languages states to normalized English states
-            "Active" = "Active"
-            "Conn" = "Active"
-            "Connected" = "Active"
-            "Disc" = "Disconnected"
-            "Disconnected" = "Disconnected"
-            "Listen" = "Listen"
-            "Aktiv" = "Active"
-            "Verbunden" = "Active"
-            "Getrennt" = "Disconnected"
-            "Actif" = "Active"
-            "Activo" = "Active"
-        }
-    }
-    
-    process {
-        try {
-            # Use different implementations for PS5.1 and PS7+
-            if ($IsPS7Plus) {
-                $sessions = Get-RDPSessionsPS7 @PSBoundParameters
-            } else {
-                $sessions = Get-RDPSessionsPS5 @PSBoundParameters
-            }
-            
-            # Filter active sessions if requested
-            if ($ActiveOnly) {
-                $filteredSessions = $sessions | Where-Object {
-                    $_.State -in $activeStates -or $_.State -eq "Active"
-                }
-                Write-DebugLog "Filtered to $($filteredSessions.Count) active sessions" "DEBUG"
-                $sessions = $filteredSessions
-            }
-            
-            # Return result
-            if ($RawOutput) {
-                return $sessions
-            } else {
-                return $sessions | Sort-Object -Property SessionId
-            }
-            
-        } catch {
-            Write-DebugLog "Error in Get-RDPSessions: $($_.Exception.Message)" "ERROR" @{
-                Exception = $_.Exception
-                StackTrace = $_.ScriptStackTrace
-            }
-            return @()
-        }
-    }
-}
 
-#region PowerShell 5.1 Implementation
+# Updated Get-RDPSessionsPS5 function with Russian support
 function Get-RDPSessionsPS5 {
     <#
     .SYNOPSIS
-        PowerShell 5.1 compatible session enumeration
+        PowerShell 5.1 compatible session enumeration with Russian support
     #>
     
     param(
@@ -562,7 +440,7 @@ function Get-RDPSessionsPS5 {
     $sessions = @()
     
     try {
-        # Method 1: qwinsta (main)
+        # Method 1: qwinsta with Russian encoding
         $qwinstaOutput = Get-QwinstaOutputPS5 -ComputerName $ComputerName
         if ($qwinstaOutput) {
             $sessions += Parse-QwinstaOutputPS5 -Output $qwinstaOutput
@@ -584,8 +462,27 @@ function Get-RDPSessionsPS5 {
             }
         }
         
-        # Normalization and data cleaning
-        $sessions = Normalize-SessionsPS5 -Sessions $sessions
+        # Clean and normalize
+        $normalizedSessions = @()
+        foreach ($session in $sessions) {
+            # Ensure user name is not empty
+            if ([string]::IsNullOrWhiteSpace($session.UserName) -or $session.UserName -eq "0") {
+                $session.UserName = "SYSTEM"
+            }
+            
+            # Final state normalization
+            if ($session.State -match "Активно|Active|Conn|Connected") {
+                $session.State = "Active"
+            } elseif ($session.State -match "Диск|Disc|Disconnected") {
+                $session.State = "Disconnected"
+            } elseif ($session.State -match "Прием|Listen") {
+                $session.State = "Listen"
+            }
+            
+            $normalizedSessions += $session
+        }
+        
+        $sessions = $normalizedSessions
         
         # Extended information
         if ($ExtendedInfo) {
@@ -605,16 +502,25 @@ function Get-QwinstaOutputPS5 {
     param([string]$ComputerName)
     
     try {
+        # Use proper encoding for Russian Windows (OEM 866)
         if ($ComputerName -eq $env:COMPUTERNAME) {
-            $output = qwinsta 2>$null
+            # Capture output with correct encoding
+            $process = Start-Process -FilePath "qwinsta" -NoNewWindow -RedirectStandardOutput "temp_qwinsta.txt" -PassThru -Wait
+            if (Test-Path "temp_qwinsta.txt") {
+                # Read with OEM 866 encoding for Russian
+                $output = Get-Content -Path "temp_qwinsta.txt" -Encoding OEM
+                Remove-Item "temp_qwinsta.txt" -Force
+            } else {
+                $output = qwinsta 2>$null
+            }
         } else {
-            $output = qwinsta /server:$ComputerName 2>$null
-        }
-        
-        # Convert to correct encoding for PS5.1
-        if ($output -and [System.Text.Encoding]::Default.BodyName -ne 'utf-8') {
-            $bytes = [System.Text.Encoding]::Default.GetBytes($output)
-            $output = [System.Text.Encoding]::UTF8.GetString($bytes)
+            $process = Start-Process -FilePath "qwinsta" -ArgumentList "/server:$ComputerName" -NoNewWindow -RedirectStandardOutput "temp_qwinsta.txt" -PassThru -Wait
+            if (Test-Path "temp_qwinsta.txt") {
+                $output = Get-Content -Path "temp_qwinsta.txt" -Encoding OEM
+                Remove-Item "temp_qwinsta.txt" -Force
+            } else {
+                $output = qwinsta /server:$ComputerName 2>$null
+            }
         }
         
         return $output
@@ -628,11 +534,16 @@ function Parse-QwinstaOutputPS5 {
     param([string]$Output)
     
     $sessions = @()
+    
+    if ([string]::IsNullOrWhiteSpace($Output)) {
+        return $sessions
+    }
+    
     $lines = @($Output -split "`r`n" | Where-Object { $_ -match '\S' })
     
     foreach ($line in $lines) {
-        # Skip headers and separators
-        if ($line -match 'SESSIONNAME|SESSION|^[-=]+$' -or [string]::IsNullOrWhiteSpace($line)) {
+        # Skip headers
+        if ($line -match 'СЕАНС|SESSIONNAME|SESSION|^[-=]+$' -or [string]::IsNullOrWhiteSpace($line)) {
             continue
         }
         
@@ -656,86 +567,90 @@ function Parse-QwinstaLinePS5 {
             $Line = $Line.Substring(1).TrimStart()
         }
         
-        # Universal parsing for PS5.1
-        # Split by 2+ spaces and remove empty elements
-        $parts = @($Line -split '\s{2,}' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        # Clean line
+        $cleanLine = $Line -replace '\s+', ' '
         
-        if ($parts.Count -lt 3) {
-            return $null
-        }
+        # Parse for Russian output
+        $parts = $cleanLine.Trim() -split ' ' | Where-Object { $_ -ne '' }
         
-        # Initialize session object
-        $session = [PSCustomObject]@{
-            SessionName = ""
-            UserName = "SYSTEM"
-            SessionId = 0
-            State = ""
-            Type = ""
-            Device = ""
-            IsCurrent = $isCurrent
-            Source = "qwinsta_ps5"
-        }
-        
-        # Intelligent parsing based on part count
-        $parsed = $false
-        
-        # First try to find ID (number)
-        $idIndex = -1
-        for ($i = 0; $i -lt $parts.Count; $i++) {
-            if ($parts[$i] -match '^\d+$') {
-                $idIndex = $i
-                $session.SessionId = [int]$parts[$i]
-                break
-            }
-        }
-        
-        if ($idIndex -eq -1) {
-            # ID not found, try another strategy
-            return Parse-QwinstaLineFallbackPS5 -Line $Line -IsCurrent:$isCurrent
-        }
-        
-        # Determine elements before ID
-        if ($idIndex -gt 0) {
-            $beforeId = $parts[0..($idIndex-1)]
+        if ($parts.Count -ge 4) {
+            $sessionName = ""
+            $userName = ""
+            $sessionId = 0
+            $state = ""
+            $type = ""
+            $device = ""
             
-            # If 1 element before ID, it could be SessionName or UserName
-            if ($beforeId.Count -eq 1) {
-                $element = $beforeId[0]
-                if ($element -match '^(rdp-tcp|console|services)') {
-                    $session.SessionName = $element
-                } else {
-                    $session.UserName = $element
+            # Find ID
+            $idIndex = -1
+            for ($i = 0; $i -lt $parts.Count; $i++) {
+                if ($parts[$i] -match '^\d+$') {
+                    $idIndex = $i
+                    $sessionId = [int]$parts[$i]
+                    break
                 }
             }
-            # If 2 elements before ID, it's SessionName and UserName
-            elseif ($beforeId.Count -ge 2) {
-                $session.SessionName = $beforeId[0]
-                $session.UserName = $beforeId[1]
+            
+            if ($idIndex -eq -1) {
+                return $null
+            }
+            
+            # Get session name and user
+            if ($idIndex -eq 1) {
+                $sessionName = $parts[0]
+                $userName = "SYSTEM"
+            } elseif ($idIndex -eq 2) {
+                $sessionName = $parts[0]
+                $userName = $parts[1]
+            }
+            
+            # Get state
+            if ($idIndex + 1 -lt $parts.Count) {
+                $state = $parts[$idIndex + 1]
+            }
+            
+            # Get type
+            if ($idIndex + 2 -lt $parts.Count) {
+                $type = $parts[$idIndex + 2]
+            }
+            
+            # Get device
+            if ($idIndex + 3 -lt $parts.Count) {
+                $device = $parts[$idIndex + 3]
+            }
+            
+            # Handle system sessions
+            if ([string]::IsNullOrWhiteSpace($userName) -or $userName -eq "0") {
+                $userName = "SYSTEM"
+            }
+            
+            # Normalize Russian states
+            switch ($state) {
+                "Активно" { $state = "Active" }
+                "Диск" { $state = "Disconnected" }
+                "Прием" { $state = "Listen" }
+                default {
+                    if ($state -match "Active|Conn|Connected") {
+                        $state = "Active"
+                    } elseif ($state -match "Disc|Disconnected") {
+                        $state = "Disconnected"
+                    }
+                }
+            }
+            
+            return [PSCustomObject]@{
+                SessionName = $sessionName
+                UserName = $userName
+                SessionId = $sessionId
+                State = $state
+                Type = $type
+                Device = $device
+                IsCurrent = $isCurrent
+                Source = "qwinsta_ps5_ru"
             }
         }
         
-        # Determine State (after ID)
-        if ($idIndex + 1 -lt $parts.Count) {
-            $session.State = $parts[$idIndex + 1]
-        }
-        
-        # Determine Type (after State)
-        if ($idIndex + 2 -lt $parts.Count) {
-            $session.Type = $parts[$idIndex + 2]
-        }
-        
-        # Determine Device (after Type)
-        if ($idIndex + 3 -lt $parts.Count) {
-            $session.Device = $parts[$idIndex + 3]
-        }
-        
-        # Clean values
-        $session.UserName = if ([string]::IsNullOrWhiteSpace($session.UserName) -or 
-                                  $session.UserName -eq "0") { "SYSTEM" } else { $session.UserName.Trim() }
-        
-        $session.SessionName = $session.SessionName.Trim()
-        
-        return $session
+        return $null
         
     } catch {
         Write-DebugLog "Error parsing line in PS5.1: $_" "DEBUG"
@@ -809,7 +724,7 @@ function Normalize-SessionsPS5 {
 function Get-RDPSessionsPS7 {
     <#
     .SYNOPSIS
-        PowerShell 7+ optimized session enumeration with modern features
+        PowerShell 7+ optimized session enumeration with Russian support
     #>
     
     param(
@@ -820,9 +735,7 @@ function Get-RDPSessionsPS7 {
     $sessions = @()
     
     try {
-        # Use modern PS7+ features
-        
-        # Method 1: qwinsta with improved parsing
+        # Use qwinsta with proper Russian encoding
         $qwinstaOutput = Get-QwinstaOutputPS7 -ComputerName $ComputerName
         if ($qwinstaOutput) {
             $sessions += Parse-QwinstaOutputPS7 -Output $qwinstaOutput
@@ -833,31 +746,27 @@ function Get-RDPSessionsPS7 {
             $sessions += Get-QuerySessionParallel -ComputerName $ComputerName
         }
         
-        # Method 3: Use CIM with parallelism
-        if ($sessions.Count -eq 0) {
-            $sessions += Get-CimSessionsParallel -ComputerName $ComputerName
-        }
-        
-        # Normalization with PowerShell 5.1 compatible syntax
-        $sessions = $sessions | ForEach-Object {
-            $session = $_
-            
-            # Use compatible null-check for PowerShell 5.1
-            if (-not $session.UserName -or [string]::IsNullOrWhiteSpace($session.UserName)) { 
+        # Clean and normalize
+        $normalizedSessions = @()
+        foreach ($session in $sessions) {
+            # Ensure user name is not empty
+            if ([string]::IsNullOrWhiteSpace($session.UserName) -or $session.UserName -eq "0") { 
                 $session.UserName = "SYSTEM" 
             }
             
-            # Use if-else for normalization (compatible with PowerShell 5.1)
-            if ($session.State -match "Active|Conn") {
+            # Final state normalization
+            if ($session.State -match "Активно|Active|Conn|Connected") {
                 $session.State = "Active"
-            } elseif ($session.State -match "Disc|Disconnected") {
+            } elseif ($session.State -match "Диск|Disc|Disconnected") {
                 $session.State = "Disconnected"
-            } elseif ($session.State -match "Listen") {
+            } elseif ($session.State -match "Прием|Listen") {
                 $session.State = "Listen"
             }
             
-            $session
+            $normalizedSessions += $session
         }
+        
+        $sessions = $normalizedSessions
         
         # Extended information with compatibility
         if ($ExtendedInfo) {
@@ -879,29 +788,419 @@ function Get-QwinstaOutputPS7 {
     param([string]$ComputerName)
     
     try {
-        # Use Start-Process with UTF-8 support for PS7 compatibility
-        $processInfo = @{
-            FilePath = "qwinsta"
-            NoNewWindow = $true
-            RedirectStandardOutput = $true
-            UseNewEnvironment = $true
-        }
+        # Use proper encoding for Russian Windows
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = "qwinsta"
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
         
-        # Build arguments safely for PowerShell 5.1 compatibility
+        # Set OEM 866 encoding for Russian console output
+        $psi.StandardOutputEncoding = [System.Text.Encoding]::GetEncoding(866)
+        $psi.StandardErrorEncoding = [System.Text.Encoding]::GetEncoding(866)
+        
         if ($ComputerName -ne $env:COMPUTERNAME) {
-            $processInfo.ArgumentList = "/server:$ComputerName"
+            $psi.Arguments = "/server:$ComputerName"
         }
         
-        $process = Start-Process @processInfo -PassThru
-        $output = $process.StandardOutput.ReadToEnd()
-        $process.WaitForExit()
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $psi
         
-        # In PS7+ use UTF-8 by default
-        return $output
+        if ($process.Start()) {
+            $output = $process.StandardOutput.ReadToEnd()
+            $process.WaitForExit()
+            
+            # Convert from OEM 866 to UTF-8 for proper display
+            $bytes = [System.Text.Encoding]::GetEncoding(866).GetBytes($output)
+            $output = [System.Text.Encoding]::UTF8.GetString($bytes)
+            
+            return $output
+        }
+        
+        return $null
         
     } catch {
         Write-DebugLog "qwinsta failed in PS7+: $_" "DEBUG"
+        
+        # Fallback method
+        try {
+            if ($ComputerName -eq $env:COMPUTERNAME) {
+                $output = qwinsta 2>&1 | Out-String
+            } else {
+                $output = qwinsta /server:$ComputerName 2>&1 | Out-String
+            }
+            return $output
+        } catch {
+            Write-DebugLog "Fallback method also failed: $_" "WARNING"
+            return $null
+        }
+    }
+}
+
+function Fix-RussianEncoding {
+    param([string]$Text)
+    
+    # Common Russian words to detect encoding issues
+    $russianPatterns = @{
+        'СЕАНС' = 'сеанс'
+        'ПОЛЬЗОВАТЕЛЬ' = 'пользователь'
+        'СОСТОЯНИЕ' = 'состояние'
+        'Активно' = 'активно'
+        'Диск' = 'диск'
+        'Прием' = 'прием'
+    }
+    
+    # Try different encodings
+    $encodings = @(
+        [System.Text.Encoding]::GetEncoding(866),  # OEM Russian
+        [System.Text.Encoding]::GetEncoding(1251), # Windows Cyrillic
+        [System.Text.Encoding]::GetEncoding(28595), # ISO 8859-5 Cyrillic
+        [System.Text.Encoding]::Default            # System default
+    )
+    
+    foreach ($encoding in $encodings) {
+        try {
+            $bytes = [System.Text.Encoding]::Default.GetBytes($Text)
+            $decodedText = $encoding.GetString($bytes)
+            
+            # Check if decoded text contains Russian words
+            $containsRussian = $false
+            foreach ($pattern in $russianPatterns.Keys) {
+                if ($decodedText -match $pattern -or $decodedText -match $russianPatterns[$pattern]) {
+                    $containsRussian = $true
+                    break
+                }
+            }
+            
+            if ($containsRussian) {
+                # Convert to UTF-8
+                $utf8Bytes = [System.Text.Encoding]::Convert(
+                    $encoding,
+                    [System.Text.Encoding]::UTF8,
+                    [System.Text.Encoding]::Default.GetBytes($Text)
+                )
+                return [System.Text.Encoding]::UTF8.GetString($utf8Bytes)
+            }
+            
+        } catch {
+            continue
+        }
+    }
+    
+    return $Text
+}
+
+function Parse-QwinstaOutputPS7 {
+    param([string]$Output)
+    
+    $sessions = [System.Collections.Generic.List[PSObject]]::new()
+    
+    if ([string]::IsNullOrWhiteSpace($Output)) {
+        return $sessions
+    }
+    
+    # Use proper string splitting
+    $lines = $Output -split '\r?\n' | Where-Object { 
+        $_ -match '\S' -and $_ -notmatch '^\s*$' 
+    }
+    
+    # Debug: log first few lines to see what we're parsing
+    if ($DebugMode -or $VerbosePreference -ne 'SilentlyContinue') {
+        Write-DebugLog "Parsing $($lines.Count) lines from qwinsta output" "DEBUG"
+        for ($i = 0; $i -lt [Math]::Min(5, $lines.Count); $i++) {
+            $lineContent = $lines[$i]
+            Write-DebugLog "Line $i : '$lineContent'" "DEBUG"
+        }
+    }
+    
+    # Manual parsing approach for Russian output
+    foreach ($line in $lines) {
+        # Skip headers - support Russian and English headers
+        if ($line -match 'СЕАНС|SESSIONNAME|SESSION|^[-=]+$' -or 
+            $line -match 'ПОЛЬЗОВАТЕЛЬ|USERNAME|USER') {
+            continue
+        }
+        
+        # Handle current session marker
+        $isCurrent = $false
+        if ($line.StartsWith('>')) {
+            $isCurrent = $true
+            $line = $line.Substring(1).TrimStart()
+        }
+        
+        # For Russian output, we need to parse differently
+        # The format is usually: session user id state type device
+        # But with Russian, session might be empty or have different patterns
+        
+        # Clean multiple spaces
+        $cleanLine = $line -replace '\s+', ' '
+        
+        # Split by spaces
+        $parts = $cleanLine.Trim() -split ' ' | Where-Object { $_ -ne '' }
+        
+        if ($parts.Count -ge 4) {
+            $sessionName = ""
+            $userName = ""
+            $sessionId = 0
+            $state = ""
+            $type = ""
+            $device = ""
+            
+            # Strategy 1: Look for ID (number)
+            $idIndex = -1
+            for ($j = 0; $j -lt $parts.Count; $j++) {
+                if ($parts[$j] -match '^\d+$') {
+                    $idIndex = $j
+                    $sessionId = [int]$parts[$j]
+                    break
+                }
+            }
+            
+            if ($idIndex -ne -1) {
+                # Determine session name and user name based on ID position
+                if ($idIndex -eq 1) {
+                    # Format: session user id state type device
+                    $sessionName = $parts[0]
+                    $userName = "SYSTEM"
+                } elseif ($idIndex -eq 2) {
+                    # Format: session user id state type device
+                    $sessionName = $parts[0]
+                    $userName = $parts[1]
+                }
+                
+                # Get state
+                if ($idIndex + 1 -lt $parts.Count) {
+                    $state = $parts[$idIndex + 1]
+                }
+                
+                # Get type
+                if ($idIndex + 2 -lt $parts.Count) {
+                    $type = $parts[$idIndex + 2]
+                }
+                
+                # Get device
+                if ($idIndex + 3 -lt $parts.Count) {
+                    $device = $parts[$idIndex + 3]
+                }
+                
+                # Handle empty user names for system sessions
+                if ([string]::IsNullOrWhiteSpace($userName) -or $userName -eq "0") {
+                    $userName = "SYSTEM"
+                }
+                
+                # Normalize Russian state names to English
+                switch ($state) {
+                    "Активно" { $state = "Active" }
+                    "Диск" { $state = "Disconnected" }
+                    "Прием" { $state = "Listen" }
+                    default { 
+                        # Try to match common patterns
+                        if ($state -match "Active|Conn|Connected") {
+                            $state = "Active"
+                        } elseif ($state -match "Disc|Disconnected") {
+                            $state = "Disconnected"
+                        } elseif ($state -match "Listen") {
+                            $state = "Listen"
+                        }
+                    }
+                }
+                
+                $session = [PSCustomObject]@{
+                    SessionName = $sessionName
+                    UserName = $userName
+                    SessionId = $sessionId
+                    State = $state
+                    Type = $type
+                    Device = $device
+                    IsCurrent = $isCurrent
+                    Source = "qwinsta_ps7_ru"
+                }
+                
+                $sessions.Add($session)
+            }
+        }
+    }
+    
+    return $sessions
+}
+
+function Get-QuerySessionOutputPS5 {
+    param([string]$ComputerName)
+    
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = "query"
+        $psi.Arguments = "session"
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        
+        # Set proper encoding for Russian Windows
+        $psi.StandardOutputEncoding = [System.Text.Encoding]::GetEncoding(866)  # OEM Russian
+        $psi.StandardErrorEncoding = [System.Text.Encoding]::GetEncoding(866)   # OEM Russian
+        
+        if ($ComputerName -ne $env:COMPUTERNAME) {
+            $psi.Arguments = "session /server:$ComputerName"
+        }
+        
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $psi
+        
+        if ($process.Start()) {
+            $output = $process.StandardOutput.ReadToEnd()
+            $process.WaitForExit()
+            
+            # Convert from OEM Russian (866) to UTF-8
+            if ($output -and $output.Length -gt 0) {
+                $utf8Bytes = [System.Text.Encoding]::Convert(
+                    [System.Text.Encoding]::GetEncoding(866),
+                    [System.Text.Encoding]::UTF8,
+                    [System.Text.Encoding]::GetEncoding(866).GetBytes($output)
+                )
+                $output = [System.Text.Encoding]::UTF8.GetString($utf8Bytes)
+            }
+            
+            return $output
+        }
+        
         return $null
+        
+    } catch {
+        Write-DebugLog "query session failed in PS5.1: $_" "DEBUG"
+        return $null
+    }
+}
+
+# Update the Get-RDPSessions function to handle encoding properly
+function Get-RDPSessions {
+    <#
+    .SYNOPSIS
+        Retrieves RDP sessions with universal parsing for all Windows locales and PowerShell versions
+    
+    .DESCRIPTION
+        Advanced session enumeration supporting:
+        - All Windows locales (English, Russian, German, French, Spanish, etc.)
+        - PowerShell 5.1 through 7+
+        - Multiple fallback methods with intelligent detection
+        - Extended client information
+        - Performance optimizations for PS7+
+    
+    .PARAMETER ComputerName
+        Target computer name (default: local computer)
+    
+    .PARAMETER ExtendedInfo
+        Include extended client information (IP, hostname)
+    
+    .PARAMETER ActiveOnly
+        Return only active/connected sessions
+    
+    .PARAMETER RawOutput
+        Return raw session objects without formatting
+    
+    .EXAMPLE
+        Get-RDPSessions
+        # List all sessions on local computer
+    
+    .EXAMPLE
+        Get-RDPSessions -ComputerName "SERVER01" -ActiveOnly
+        # List active sessions on remote server
+    
+    .EXAMPLE
+        Get-RDPSessions -ExtendedInfo -RawOutput | Export-Csv "sessions.csv"
+        # Export detailed session information
+    
+    .OUTPUTS
+        PSCustomObject[] with session properties
+    #>
+    
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [string]$ComputerName = $env:COMPUTERNAME,
+        
+        [Parameter()]
+        [switch]$ExtendedInfo,
+        
+        [Parameter()]
+        [switch]$ActiveOnly,
+        
+        [Parameter()]
+        [switch]$RawOutput
+    )
+    
+    begin {
+        Write-DebugLog "Retrieving RDP sessions from $ComputerName..." "INFO" @{
+            ComputerName = $ComputerName
+            ExtendedInfo = $ExtendedInfo
+            ActiveOnly = $ActiveOnly
+            PowerShellVersion = $PSVersionTable.PSVersion
+            Culture = [System.Threading.Thread]::CurrentThread.CurrentCulture.Name
+            CurrentEncoding = [System.Text.Encoding]::Default.EncodingName
+        }
+        
+        # Determine if running in PowerShell 7+
+        $IsPS7Plus = $PSVersionTable.PSVersion.Major -ge 7
+        
+        # Cache for quick access to states
+        $activeStates = @("Active", "Conn", "Connected", "Активно")
+        
+        # Dictionary for state normalization (include Russian states)
+        $stateNormalization = @{
+            # English and other languages states to normalized English states
+            "Active" = "Active"
+            "Conn" = "Active"
+            "Connected" = "Active"
+            "Disc" = "Disconnected"
+            "Disconnected" = "Disconnected"
+            "Listen" = "Listen"
+            "Aktiv" = "Active"
+            "Verbunden" = "Active"
+            "Getrennt" = "Disconnected"
+            "Actif" = "Active"
+            "Activo" = "Active"
+            # Russian states
+            "Активно" = "Active"
+            "Диск" = "Disconnected"
+            "Отключено" = "Disconnected"
+            "Прием" = "Listen"
+            "Ожидание" = "Listen"
+        }
+    }
+    
+    process {
+        try {
+            # Use different implementations for PS5.1 and PS7+
+            if ($IsPS7Plus) {
+                $sessions = Get-RDPSessionsPS7 @PSBoundParameters
+            } else {
+                $sessions = Get-RDPSessionsPS5 @PSBoundParameters
+            }
+            
+            # Filter active sessions if requested
+            if ($ActiveOnly) {
+                $filteredSessions = $sessions | Where-Object {
+                    $_.State -in $activeStates -or $_.State -eq "Active"
+                }
+                Write-DebugLog "Filtered to $($filteredSessions.Count) active sessions" "DEBUG"
+                $sessions = $filteredSessions
+            }
+            
+            # Return result
+            if ($RawOutput) {
+                return $sessions
+            } else {
+                return $sessions | Sort-Object -Property SessionId
+            }
+            
+        } catch {
+            Write-DebugLog "Error in Get-RDPSessions: $($_.Exception.Message)" "ERROR" @{
+                Exception = $_.Exception
+                StackTrace = $_.ScriptStackTrace
+            }
+            return @()
+        }
     }
 }
 
