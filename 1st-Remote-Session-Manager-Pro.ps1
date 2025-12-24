@@ -88,8 +88,8 @@ param(
 $SCRIPT_NAME = "RemoteSessionManagerPro"
 $SCRIPT_VERSION = "1.0.0"
 $SCRIPT_AUTHOR = "Mikhail Deynekin"
-$GITHUB_REPO = "https://github.com/mid1977/RemoteSessionManagerPro"
-$RAW_GITHUB_URL = "https://raw.githubusercontent.com/mid1977/RemoteSessionManagerPro/refs/heads/main/RemoteSessionManagerPro.ps1"
+$GITHUB_REPO = "https://raw.githubusercontent.com/paulmann/1st-Remote-Session-Manager-Pro"
+$RAW_GITHUB_URL = "https://raw.githubusercontent.com/paulmann/1st-Remote-Session-Manager-Pro/refs/heads/main/1st-Remote-Session-Manager-Pro.ps1"
 
 # RDP/MSTSC Configuration
 $DEFAULT_MSTSC_PARAMS = @(
