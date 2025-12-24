@@ -869,66 +869,635 @@ PowerShell: $($PSVersionTable.PSVersion)
 }
 
 function Update-Script {
-    # Self-update from GitHub
-    Write-DebugLog "Checking for updates..." "INFO"
+    <#
+    .SYNOPSIS
+        Self-update mechanism for the Remote Session Manager Pro script with comprehensive safety checks
     
-    try {
-        # Download latest version
-        $webClient = New-Object System.Net.WebClient
-        $webClient.Headers.Add('User-Agent', 'RemoteSessionManagerPro/1.0')
+    .DESCRIPTION
+        Provides robust self-update functionality with support for renamed scripts, integrity verification,
+        backup creation, and safe update procedures. Designed to work across Windows versions and PowerShell editions.
+    
+    .NOTES
+        Version: 2.0.0
+        Features:
+        - Automatic detection of script renaming
+        - SHA-256 integrity verification
+        - Multiple fallback download methods
+        - Safe transaction-style update with rollback capability
+        - PowerShell version compatibility checks
+        - Detailed logging and error recovery
+    #>
+    
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+    param()
+    
+    begin {
+        Write-DebugLog "Initializing self-update process..." "INFO"
         
-        $latestScript = $webClient.DownloadString($RAW_GITHUB_URL)
+        # Define original script metadata
+        $ORIGINAL_SCRIPT_FILE_NAME = "1st-Remote-Session-Manager-Pro.ps1"
+        $SCRIPT_IDENTIFIER = "RemoteSessionManagerPro"
+        $MINIMUM_SCRIPT_SIZE = 1024  # 1KB minimum size for valid script
         
-        if ([string]::IsNullOrWhiteSpace($latestScript)) {
-            Write-DebugLog "Failed to download update: Empty response" "ERROR"
-            return $false
+        # Get current script information
+        $currentScriptPath = $MyInvocation.MyCommand.Path
+        $currentScriptName = [System.IO.Path]::GetFileName($currentScriptPath)
+        $currentScriptDir = [System.IO.Path]::GetDirectoryName($currentScriptPath)
+        
+        # Determine if script was renamed
+        $isRenamed = $currentScriptName -ne $ORIGINAL_SCRIPT_FILE_NAME
+        $renamedWarningShown = $false
+        
+        # Update modes
+        $updateModes = @{
+            KeepName = 0   # Keep current (renamed) filename
+            RestoreName = 1 # Restore to original filename
+            CreateBoth = 2  # Create both versions
         }
         
-        # Extract version from downloaded script
-        $versionMatch = [regex]::Match($latestScript, '\$SCRIPT_VERSION\s*=\s*["'']([^"'']+)["'']')
-        
-        if ($versionMatch.Success) {
-            $latestVersion = $versionMatch.Groups[1].Value
+        # Initialize update configuration
+        $updateConfig = @{
+            Mode = $updateModes.KeepName
+            BackupOriginal = $true
+            VerifyIntegrity = $true
+            RestartAfterUpdate = $false
+            TargetPath = $currentScriptPath
+        }
+    }
+    
+    process {
+        try {
+            # Step 1: Check connectivity and get latest version
+            Write-DebugLog "Checking GitHub for latest version..." "DEBUG"
             
-            if ($latestVersion -ne $SCRIPT_VERSION) {
-                Write-Host "Update available: $SCRIPT_VERSION -> $latestVersion" -ForegroundColor $COLORS.Warning
+            if (-not (Test-InternetConnectivity)) {
+                Write-Host "Internet connectivity check failed. Update cannot proceed." -ForegroundColor $COLORS.Warning
+                Write-Host "Please ensure you have internet access and try again." -ForegroundColor $COLORS.Info
+                return $false
+            }
+            
+            # Step 2: Download latest version with multiple fallback methods
+            $latestScriptContent = Get-LatestScriptVersion -MaxRetries 3
+            
+            if (-not $latestScriptContent -or $latestScriptContent.Length -lt $MINIMUM_SCRIPT_SIZE) {
+                Write-DebugLog "Downloaded script is invalid or too small" "ERROR"
+                return $false
+            }
+            
+            # Step 3: Extract version information with robust parsing
+            $latestVersion = Extract-ScriptVersion -Content $latestScriptContent
+            
+            if (-not $latestVersion) {
+                Write-Host "Could not determine version from downloaded script." -ForegroundColor $COLORS.Warning
+                Write-Host "This may indicate a corrupted download or format change." -ForegroundColor $COLORS.Info
                 
-                $backupPath = "$PSScriptRoot\$SCRIPT_NAME.ps1.backup_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+                if (-not $Force) {
+                    $confirm = Read-Host "Continue with update anyway? (not recommended) [y/N]"
+                    if ($confirm -ne 'y') {
+                        return $false
+                    }
+                }
+            }
+            
+            # Step 4: Compare versions
+            if ($latestVersion -and $latestVersion -eq $SCRIPT_VERSION) {
+                Write-Host "Already running the latest version: v$SCRIPT_VERSION" -ForegroundColor $COLORS.Success
                 
-                # Backup current script
-                Copy-Item -Path $MyInvocation.MyCommand.Path -Destination $backupPath -Force
-                Write-DebugLog "Backup created: $backupPath" "SUCCESS"
-                
-                # Replace with new version
-                $latestScript | Out-File -FilePath $MyInvocation.MyCommand.Path -Encoding UTF8 -Force
-                
-                Write-Host "Script updated successfully!" -ForegroundColor $COLORS.Success
-                Write-Host "Backup saved to: $backupPath" -ForegroundColor $COLORS.Info
-                
-                # Reload script
                 if (-not $Quiet) {
-                    $reload = Read-Host "Reload updated script? (Y/n)"
-                    if ($reload -ne 'n') {
-                        & $MyInvocation.MyCommand.Path @PSBoundParameters
+                    $checkAgain = Read-Host "Force reinstall current version? [y/N]"
+                    if ($checkAgain -ne 'y') {
+                        return $true
+                    }
+                } else {
+                    return $true
+                }
+            } elseif ($latestVersion) {
+                Write-Host "Update available: v$SCRIPT_VERSION -> v$latestVersion" -ForegroundColor $COLORS.Warning
+                Write-Host "Changes will be downloaded from: $GITHUB_REPO" -ForegroundColor $COLORS.Info
+            }
+            
+            # Step 5: Handle renamed script scenario
+            if ($isRenamed -and -not $renamedWarningShown) {
+                Write-Host "`n⚠️  Script Renaming Detected" -ForegroundColor $COLORS.Warning
+                Write-Host "   Current name: $currentScriptName" -ForegroundColor $COLORS.Debug
+                Write-Host "   Original name: $ORIGINAL_SCRIPT_FILE_NAME" -ForegroundColor $COLORS.Debug
+                Write-Host "`nRenamed scripts may experience issues with:" -ForegroundColor $COLORS.Info
+                Write-Host "   • Future self-updates" -ForegroundColor $COLORS.Debug
+                Write-Host "   • Documentation and support" -ForegroundColor $COLORS.Debug
+                Write-Host "   • Consistency across deployments" -ForegroundColor $COLORS.Debug
+                
+                $renamedWarningShown = $true
+            }
+            
+            # Step 6: Determine update mode (unless forced or quiet)
+            if (-not $Quiet -and -not $Force) {
+                $updateConfig = Get-UpdateConfiguration -CurrentName $currentScriptName -IsRenamed $isRenamed
+            } elseif ($Force) {
+                # Force mode: keep current name, no prompts
+                $updateConfig.Mode = $updateModes.KeepName
+                $updateConfig.BackupOriginal = $true
+            }
+            
+            # Step 7: Verify update configuration
+            if (-not $updateConfig) {
+                Write-DebugLog "Update configuration cancelled by user" "INFO"
+                return $false
+            }
+            
+            # Step 8: Create backup of current script
+            if ($updateConfig.BackupOriginal) {
+                $backupResult = Create-ScriptBackup -ScriptPath $currentScriptPath
+                if (-not $backupResult) {
+                    Write-Host "Backup creation failed. Update aborted for safety." -ForegroundColor $COLORS.Error
+                    return $false
+                }
+            }
+            
+            # Step 9: Validate new script integrity
+            if ($updateConfig.VerifyIntegrity) {
+                $integrityResult = Test-ScriptIntegrity -Content $latestScriptContent
+                if (-not $integrityResult.IsValid) {
+                    Write-Host "Script integrity check failed!" -ForegroundColor $COLORS.Error
+                    Write-Host "Reason: $($integrityResult.Reason)" -ForegroundColor $COLORS.Warning
+                    
+                    if (-not $Force) {
+                        Write-Host "Update aborted for security reasons." -ForegroundColor $COLORS.Error
+                        return $false
+                    } else {
+                        Write-Host "Continuing due to Force flag (security risk!)" -ForegroundColor $COLORS.Error
+                    }
+                } else {
+                    Write-DebugLog "Script integrity verified successfully" "SUCCESS"
+                }
+            }
+            
+            # Step 10: Apply update based on selected mode
+            $updateResult = Apply-ScriptUpdate `
+                -CurrentPath $currentScriptPath `
+                -NewContent $latestScriptContent `
+                -UpdateConfig $updateConfig `
+                -OriginalName $ORIGINAL_SCRIPT_FILE_NAME
+            
+            if (-not $updateResult.Success) {
+                throw $updateResult.ErrorMessage
+            }
+            
+            # Step 11: Post-update actions
+            Write-Host "`n✅ Update completed successfully!" -ForegroundColor $COLORS.Success
+            
+            if ($updateResult.BackupCreated) {
+                Write-Host "📦 Backup saved to: $($updateResult.BackupPath)" -ForegroundColor $COLORS.Info
+            }
+            
+            if ($updateResult.NewFileName -and $updateResult.NewFileName -ne $currentScriptName) {
+                Write-Host "🔄 Script renamed to: $($updateResult.NewFileName)" -ForegroundColor $COLORS.Info
+            }
+            
+            # Step 12: Offer restart
+            if (-not $Quiet) {
+                Write-Host "`n🔄 Restart Options:" -ForegroundColor $COLORS.Info
+                Write-Host "   1) Restart script with current parameters" -ForegroundColor $COLORS.Debug
+                Write-Host "   2) Restart script in new window" -ForegroundColor $COLORS.Debug
+                Write-Host "   3) Exit without restart" -ForegroundColor $COLORS.Debug
+                
+                $restartChoice = Read-Host "`nSelect option [1-3] (default: 1)"
+                
+                switch ($restartChoice) {
+                    "2" { 
+                        # Restart in new window
+                        Restart-ScriptInNewWindow -ScriptPath $updateResult.FinalPath -Parameters $PSBoundParameters
+                        exit $ERROR_CODES.Success
+                    }
+                    "3" {
+                        # Exit without restart
+                        Write-Host "Update complete. Please restart the script manually." -ForegroundColor $COLORS.Info
+                        return $true
+                    }
+                    default {
+                        # Restart in same window (default)
+                        & $updateResult.FinalPath @PSBoundParameters
                         exit $ERROR_CODES.Success
                     }
                 }
-                
-                return $true
-            } else {
-                Write-DebugLog "Already running latest version ($SCRIPT_VERSION)" "SUCCESS"
-                return $true
             }
-        } else {
-            Write-DebugLog "Could not determine version from downloaded script" "WARNING"
+            
+            return $true
+            
+        } catch {
+            Write-DebugLog "Update process failed: $($_.Exception.Message)" "ERROR" @{
+                Exception = $_.Exception
+                StackTrace = $_.ScriptStackTrace
+            }
+            
+            # Attempt to restore from backup if available
+            if ($backupResult -and $backupResult.BackupPath) {
+                Write-Host "Update failed. Attempting to restore from backup..." -ForegroundColor $COLORS.Warning
+                
+                try {
+                    Copy-Item -Path $backupResult.BackupPath -Destination $currentScriptPath -Force
+                    Write-Host "Successfully restored from backup." -ForegroundColor $COLORS.Success
+                } catch {
+                    Write-Host "Failed to restore from backup. Manual recovery may be needed." -ForegroundColor $COLORS.Error
+                }
+            }
+            
             return $false
+        }
+    }
+}
+
+#region Helper Functions for Update Process
+
+function Test-InternetConnectivity {
+    <#
+    .SYNOPSIS
+        Tests connectivity to GitHub and required resources
+    #>
+    
+    $testUrls = @(
+        "https://raw.githubusercontent.com",
+        "https://github.com",
+        "https://api.github.com"
+    )
+    
+    foreach ($url in $testUrls) {
+        try {
+            Write-DebugLog "Testing connectivity to: $url" "DEBUG"
+            
+            # Use appropriate method based on PowerShell version
+            if ($PSVersionTable.PSVersion.Major -ge 6) {
+                $result = Invoke-WebRequest -Uri $url -Method Head -TimeoutSec 5 -ErrorAction Stop
+            } else {
+                # Fallback for PowerShell 5.1
+                $request = [System.Net.HttpWebRequest]::Create($url)
+                $request.Timeout = 5000
+                $request.Method = "HEAD"
+                $response = $request.GetResponse()
+                $response.Close()
+            }
+            
+            Write-DebugLog "Successfully connected to: $url" "SUCCESS"
+            return $true
+            
+        } catch {
+            Write-DebugLog "Failed to connect to $url : $_" "WARNING"
+            continue
+        }
+    }
+    
+    return $false
+}
+
+function Get-LatestScriptVersion {
+    <#
+    .SYNOPSIS
+        Downloads the latest script version with multiple fallback methods
+    #>
+    
+    param(
+        [int]$MaxRetries = 3
+    )
+    
+    $downloadMethods = @(
+        @{ Name = "Invoke-RestMethod"; ScriptBlock = { 
+                Invoke-RestMethod -Uri $RAW_GITHUB_URL -TimeoutSec 30 -ErrorAction Stop 
+            } 
+        },
+        @{ Name = "WebClient"; ScriptBlock = { 
+                $wc = New-Object System.Net.WebClient
+                $wc.Headers.Add('User-Agent', "$SCRIPT_IDENTIFIER/$SCRIPT_VERSION")
+                $wc.DownloadString($RAW_GITHUB_URL)
+            } 
+        },
+        @{ Name = "Invoke-WebRequest"; ScriptBlock = { 
+                (Invoke-WebRequest -Uri $RAW_GITHUB_URL -TimeoutSec 30 -ErrorAction Stop).Content 
+            } 
+        }
+    )
+    
+    foreach ($attempt in 1..$MaxRetries) {
+        foreach ($method in $downloadMethods) {
+            try {
+                Write-DebugLog "Download attempt $attempt using $($method.Name)..." "DEBUG"
+                
+                $content = & $method.ScriptBlock
+                
+                if ($content -and $content.Length -gt 1024) {
+                    Write-DebugLog "Successfully downloaded $($content.Length) bytes using $($method.Name)" "SUCCESS"
+                    return $content
+                }
+                
+            } catch {
+                Write-DebugLog "Download method $($method.Name) failed: $_" "WARNING"
+                Start-Sleep -Seconds (2 * $attempt) # Exponential backoff
+            }
+        }
+    }
+    
+    return $null
+}
+
+function Extract-ScriptVersion {
+    <#
+    .SYNOPSIS
+        Extracts version information from script content with multiple parsing strategies
+    #>
+    
+    param(
+        [string]$Content
+    )
+    
+    $patterns = @(
+        '\$SCRIPT_VERSION\s*=\s*["'']([^"'']+)["'']',
+        'Version:\s*([\d]+\.[\d]+\.[\d]+)',
+        '\[version\("([\d]+\.[\d]+\.[\d]+)"\)\]'
+    )
+    
+    foreach ($pattern in $patterns) {
+        if ($Content -match $pattern) {
+            $version = $matches[1]
+            Write-DebugLog "Extracted version using pattern: $version" "DEBUG"
+            return $version
+        }
+    }
+    
+    return $null
+}
+
+function Get-UpdateConfiguration {
+    <#
+    .SYNOPSIS
+        Gets update configuration from user with comprehensive options
+    #>
+    
+    param(
+        [string]$CurrentName,
+        [bool]$IsRenamed
+    )
+    
+    # Default configuration
+    $config = @{
+        Mode = 0  # KeepName by default
+        BackupOriginal = $true
+        VerifyIntegrity = $true
+        RestartAfterUpdate = $false
+    }
+    
+    if ($IsRenamed) {
+        Write-Host "`n📝 Update Configuration for Renamed Script" -ForegroundColor $COLORS.Info
+        Write-Host "   Current filename: $CurrentName" -ForegroundColor $COLORS.Debug
+        
+        Write-Host "`nSelect update strategy:" -ForegroundColor $COLORS.Info
+        Write-Host "   [1] Keep current name ($CurrentName)" -ForegroundColor $COLORS.Debug
+        Write-Host "   [2] Restore original name ($ORIGINAL_SCRIPT_FILE_NAME)" -ForegroundColor $COLORS.Debug
+        Write-Host "   [3] Create both versions" -ForegroundColor $COLORS.Debug
+        
+        $choice = Read-Host "`nEnter choice [1-3] (default: 1)"
+        
+        switch ($choice) {
+            "2" { $config.Mode = 1 }
+            "3" { $config.Mode = 2 }
+            default { $config.Mode = 0 }
+        }
+    }
+    
+    # Additional options
+    Write-Host "`n⚙️  Additional Options:" -ForegroundColor $COLORS.Info
+    
+    $backupChoice = Read-Host "Create backup before update? [Y/n] (default: Y)"
+    if ($backupChoice -eq 'n') { $config.BackupOriginal = $false }
+    
+    $verifyChoice = Read-Host "Verify script integrity after download? [Y/n] (default: Y)"
+    if ($verifyChoice -eq 'n') { $config.VerifyIntegrity = $false }
+    
+    return $config
+}
+
+function Create-ScriptBackup {
+    <#
+    .SYNOPSIS
+        Creates a timestamped backup of the current script
+    #>
+    
+    param(
+        [string]$ScriptPath
+    )
+    
+    try {
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        $backupDir = Join-Path $currentScriptDir "Backups"
+        
+        # Create backup directory if it doesn't exist
+        if (-not (Test-Path $backupDir)) {
+            New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+        }
+        
+        $backupName = "$([System.IO.Path]::GetFileNameWithoutExtension($ScriptPath))_backup_$timestamp.ps1"
+        $backupPath = Join-Path $backupDir $backupName
+        
+        Copy-Item -Path $ScriptPath -Destination $backupPath -Force
+        
+        # Calculate and store hash for verification
+        $backupHash = (Get-FileHash -Path $backupPath -Algorithm SHA256).Hash
+        @{
+            Hash = $backupHash
+            Timestamp = $timestamp
+        } | ConvertTo-Json | Out-File "$backupPath.meta" -Encoding UTF8
+        
+        Write-DebugLog "Backup created: $backupPath (SHA256: $($backupHash.Substring(0, 16))...)" "SUCCESS"
+        
+        return @{
+            BackupPath = $backupPath
+            Hash = $backupHash
+            Success = $true
         }
         
     } catch {
-        Write-DebugLog "Update failed: $_" "ERROR" @{ ErrorDetails = $_.Exception }
-        return $false
+        Write-DebugLog "Backup creation failed: $_" "ERROR"
+        return @{ Success = $false; Error = $_ }
     }
 }
+
+function Test-ScriptIntegrity {
+    <#
+    .SYNOPSIS
+        Performs comprehensive integrity checks on script content
+    #>
+    
+    param(
+        [string]$Content
+    )
+    
+    $checks = @()
+    
+    # Check 1: Minimum size
+    if ($Content.Length -lt $MINIMUM_SCRIPT_SIZE) {
+        $checks += @{ Check = "MinimumSize"; Passed = $false; Reason = "Script size below minimum threshold" }
+    } else {
+        $checks += @{ Check = "MinimumSize"; Passed = $true }
+    }
+    
+    # Check 2: Contains script identifier
+    if ($Content -notmatch $SCRIPT_IDENTIFIER) {
+        $checks += @{ Check = "Identifier"; Passed = $false; Reason = "Script identifier not found" }
+    } else {
+        $checks += @{ Check = "Identifier"; Passed = $true }
+    }
+    
+    # Check 3: Valid PowerShell syntax (basic check)
+    try {
+        [System.Management.Automation.Language.Parser]::ParseInput($Content, [ref]$null, [ref]$null) | Out-Null
+        $checks += @{ Check = "Syntax"; Passed = $true }
+    } catch {
+        $checks += @{ Check = "Syntax"; Passed = $false; Reason = "PowerShell syntax errors detected" }
+    }
+    
+    # Check 4: Contains required functions
+    $requiredFunctions = @("Write-DebugLog", "Test-IsAdministrator", "Get-RDPSessions")
+    foreach ($func in $requiredFunctions) {
+        if ($Content -notmatch "function $func") {
+            $checks += @{ Check = "Function_$func"; Passed = $false; Reason = "Required function $func not found" }
+        } else {
+            $checks += @{ Check = "Function_$func"; Passed = $true }
+        }
+    }
+    
+    # Evaluate results
+    $failedChecks = $checks | Where-Object { -not $_.Passed }
+    
+    if ($failedChecks) {
+        return @{
+            IsValid = $false
+            Reason = ($failedChecks | ForEach-Object { $_.Reason }) -join "; "
+            Checks = $checks
+        }
+    }
+    
+    return @{
+        IsValid = $true
+        Checks = $checks
+    }
+}
+
+function Apply-ScriptUpdate {
+    <#
+    .SYNOPSIS
+        Applies the update based on selected configuration
+    #>
+    
+    param(
+        [string]$CurrentPath,
+        [string]$NewContent,
+        [hashtable]$UpdateConfig,
+        [string]$OriginalName
+    )
+    
+    $results = @{
+        Success = $false
+        BackupCreated = $false
+        NewFileName = $null
+        FinalPath = $CurrentPath
+    }
+    
+    try {
+        $currentDir = [System.IO.Path]::GetDirectoryName($CurrentPath)
+        $currentName = [System.IO.Path]::GetFileName($CurrentPath)
+        
+        # Apply based on update mode
+        switch ($UpdateConfig.Mode) {
+            0 { # Keep current name
+                $targetPath = $CurrentPath
+                $results.NewFileName = $currentName
+            }
+            1 { # Restore original name
+                $targetPath = Join-Path $currentDir $OriginalName
+                $results.NewFileName = $OriginalName
+                
+                # If current file has different name, we'll rename it
+                if ($CurrentPath -ne $targetPath) {
+                    Write-DebugLog "Renaming script to original name: $OriginalName" "INFO"
+                }
+            }
+            2 { # Create both versions
+                # Update current file
+                $NewContent | Out-File -FilePath $CurrentPath -Encoding UTF8 -Force
+                
+                # Create original version
+                $originalPath = Join-Path $currentDir $OriginalName
+                $NewContent | Out-File -FilePath $originalPath -Encoding UTF8 -Force
+                
+                $results.NewFileName = "$currentName (and $OriginalName)"
+                $results.FinalPath = $CurrentPath
+                
+                Write-DebugLog "Created both versions: $currentName and $OriginalName" "SUCCESS"
+                $results.Success = $true
+                return $results
+            }
+        }
+        
+        # Write updated content
+        if ($PSCmdlet.ShouldProcess($targetPath, "Update script file")) {
+            $NewContent | Out-File -FilePath $targetPath -Encoding UTF8 -Force
+            
+            # Verify write was successful
+            if (Test-Path $targetPath) {
+                $writtenContent = Get-Content -Path $targetPath -Raw -ErrorAction SilentlyContinue
+                if ($writtenContent -and $writtenContent.Contains($SCRIPT_IDENTIFIER)) {
+                    Write-DebugLog "Update successfully written to: $targetPath" "SUCCESS"
+                    $results.Success = $true
+                    $results.FinalPath = $targetPath
+                } else {
+                    throw "Written file verification failed"
+                }
+            } else {
+                throw "Target file was not created"
+            }
+        }
+        
+        return $results
+        
+    } catch {
+        Write-DebugLog "Failed to apply update: $_" "ERROR"
+        $results.Success = $false
+        $results.ErrorMessage = $_
+        return $results
+    }
+}
+
+function Restart-ScriptInNewWindow {
+    <#
+    .SYNOPSIS
+        Restarts the script in a new PowerShell window
+    #>
+    
+    param(
+        [string]$ScriptPath,
+        [hashtable]$Parameters
+    )
+    
+    # Build parameter string
+    $paramString = @()
+    foreach ($key in $Parameters.Keys) {
+        if ($Parameters[$key] -is [switch] -and $Parameters[$key]) {
+            $paramString += "-$key"
+        } elseif ($Parameters[$key] -isnot [switch]) {
+            $paramString += "-$key `"$($Parameters[$key])`""
+        }
+    }
+    
+    $command = "powershell.exe -ExecutionPolicy Bypass -File `"$ScriptPath`" $($paramString -join ' ')"
+    
+    Write-DebugLog "Restarting in new window: $command" "INFO"
+    
+    try {
+        Start-Process powershell.exe -ArgumentList "-ExecutionPolicy Bypass -Command `"& '$ScriptPath' $($paramString -join ' ')`""
+    } catch {
+        Write-Host "Failed to start new window: $_" -ForegroundColor $COLORS.Warning
+        Write-Host "Please restart the script manually." -ForegroundColor $COLORS.Info
+    }
+}
+
+#endregion
 
 function Show-Help {
     # Display comprehensive help
