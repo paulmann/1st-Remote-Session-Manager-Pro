@@ -1,6 +1,6 @@
 # 1st Remote Session Manager Pro
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/paulmann/1st-Remote-Session-Manager-Pro)
+[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](https://github.com/paulmann/1st-Remote-Session-Manager-Pro)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![PowerShell](https://img.shields.io/badge/powershell-7%2B-blue.svg)](https://docs.microsoft.com/en-us/powershell/)
 [![Platform](https://img.shields.io/badge/platform-Windows%207+-blue.svg)](https://www.microsoft.com/windows/)
