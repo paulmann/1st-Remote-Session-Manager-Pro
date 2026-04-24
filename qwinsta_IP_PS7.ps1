@@ -38,6 +38,20 @@
     - Summary statistics (total sessions, connections, matches, IP counts)
     - “Recent connections” view with resolved SessionId where possible
 
+.LINK
+    Online docs and updates:
+    https://github.com/paulmann/1st-Remote-Session-Manager-Pro
+
+    Typical usage:
+        # One-shot analysis for last 24 hours (default)
+        .\qwinsta_IP_PS7.ps1 -Command Analyze
+
+        # Analysis for last 4 hours with verbose output
+        .\qwinsta_IP_PS7.ps1 -Command Analyze -HoursBack 4 -Verbose
+
+        # Show only current qwinsta-based sessions
+        .\qwinsta_IP_PS7.ps1 -Command GetSessions
+
 .LICENSE
     See LICENSE file in the GitHub repository for licensing details.
 
