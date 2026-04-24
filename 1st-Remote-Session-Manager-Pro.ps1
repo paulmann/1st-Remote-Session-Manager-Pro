@@ -14,7 +14,7 @@
     GitHub: https://github.com/paulmann/1st-Remote-Session-Manager-Pro
 
 .AUTHOR
-    Mikhail Deynekin (paulmann)
+    Mikhail Deynekin (Mikhail “paulmann” Deynekin)
     Website: https://deynekin.com
     Email:   mid1977@gmail.com
 
@@ -34,6 +34,17 @@
     - Quick actions: disconnect, log off, send message
     - Optional auto-elevation and environment checks
     - Integration with GitHub for update checks and version information
+
+.LINK
+    Online docs and updates:
+    https://github.com/paulmann/1st-Remote-Session-Manager-Pro
+
+    Quick start:
+        # Launch interactive session manager
+        .\1st-Remote-Session-Manager-Pro.ps1
+
+        # Connect to a specific remote host
+        .\1st-Remote-Session-Manager-Pro.ps1 -ComputerName "RDPSERVER01"
 
 .LICENSE
     See LICENSE file in the GitHub repository for licensing details.
