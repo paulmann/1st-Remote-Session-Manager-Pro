@@ -4,12 +4,12 @@
     
 .DESCRIPTION
     Professional tool for managing, monitoring, and controlling RDP sessions on Windows systems.
-    Supports Windows 7/8/10/11 and Server editions with PowerShell 5.1+ compatibility.
+    Supports Windows 7/8/10/11 and Server editions with PowerShell 7.0+ compatibility.
     
 .NOTES
     Author: Mikhail Deynekin (mid1977@gmail.com)
     GitHub: https://github.com/paulmann/1st-Remote-Session-Manager-Pro
-    Version: 1.0.0
+    Version: 1.0.1
     Last Modified: 2025-01-15
     
 .LICENSE
@@ -17,7 +17,7 @@
 #>
 
 #Requires -RunAsAdministrator
-#Requires -Version 5.1
+#Requires -Version 7.0
 
 [CmdletBinding()]
 param(
