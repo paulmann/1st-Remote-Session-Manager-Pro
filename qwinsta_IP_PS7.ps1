@@ -1,22 +1,56 @@
+<#
+.SYNOPSIS
+    RDP Session Analyzer Pro – qwinsta/PS7-based RDP session and IP correlation tool.
+
+.DESCRIPTION
+    PowerShell 7-optimized script that retrieves RDP session information via qwinsta/query
+    and correlates it with client IP addresses collected from Security and Terminal Services
+    event logs, as well as live TCP connections (netstat/Get-NetTCPConnection). Produces
+    detailed console reports and optional CSV/HTML exports for diagnostics and auditing.
+
+.PROJECT
+    1st Remote Session Manager Pro – RDP Session Analyzer (PS7 qwinsta edition)
+    GitHub: https://github.com/paulmann/1st-Remote-Session-Manager-Pro
+
+.AUTHOR
+    Mikhail Deynekin (Mikhail “paulmann” Deynekin)
+    Website: https://deynekin.com
+    Email:   mid1977@gmail.com
+
+.VERSION
+    3.0.1  (RDP Session Analyzer / qwinsta_IP_PS7 branch)
+
+.REQUIREMENTS
+    - Windows 10/11 or Windows Server with RDP / Terminal Services enabled
+    - PowerShell 7+ (pwsh)
+    - Administrative privileges for reading Security and Terminal Services event logs
+    - qwinsta/query session available in PATH
+    - ExecutionPolicy that allows running local scripts
+
+.FEATURES
+    - Robust qwinsta output parsing on Russian and English Windows locales
+    - Normalized session view with SessionId, State, Type, and current marker
+    - Correlation of RDP sessions with:
+        * Security log events (4624, 4634, 4647, 4778, 4779)
+        * Terminal Services logs (21, 22, 23, 24, 25, 1149)
+        * Active TCP connections on port 3389
+    - Classification of IP addresses as internal/external with configurable ranges
+    - Summary statistics (total sessions, connections, matches, IP counts)
+    - “Recent connections” view with resolved SessionId where possible
+
+.LICENSE
+    See LICENSE file in the GitHub repository for licensing details.
+
+.NOTES
+    - Matching of historical logons to current qwinsta SessionId is heuristic by design.
+      For precise forensic mapping use time-window constraints and cross-check logs.
+    - Run PowerShell 7 as Administrator for full analysis capabilities.
+#>
+
 #requires -Version 7.0
 using namespace System.Text
 using namespace System.Collections.Generic
 using namespace System.Management.Automation
-
-<#
-.SYNOPSIS
-    RDP Session Analyzer Pro - Advanced RDP session management and analysis tool
-.DESCRIPTION
-    Professional tool for analyzing RDP sessions, correlating IP addresses, 
-    and generating comprehensive reports in multiple formats.
-    Features real-time monitoring, IP mapping, and modern HTML reporting.
-.AUTHOR
-    Mikhail Deynekin [deynekin.com]
-.REPOSITORY
-    https://github.com/paulmann/1st-Remote-Session-Manager-Pro/
-.VERSION
-    3.0.1
-#>
 
 [CmdletBinding(DefaultParameterSetName = 'Default')]
 param(
