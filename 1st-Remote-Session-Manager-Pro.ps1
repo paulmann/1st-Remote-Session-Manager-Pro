@@ -426,76 +426,50 @@ function Enable-RDPShadowing {
 
 
 # Updated Get-RDPSessionsPS5 function with Russian support
-function Get-RDPSessionsPS5 {
-    <#
-    .SYNOPSIS
-        PowerShell 5.1 compatible session enumeration with Russian support
-    #>
-    
-    param(
-        [string]$ComputerName = $env:COMPUTERNAME,
-        [switch]$ExtendedInfo
-    )
-    
-    $sessions = @()
-    
+function Get-QwinstaOutputPS5 {
+    param([string]$ComputerName)
+
     try {
-        # Method 1: qwinsta with Russian encoding
-        $qwinstaOutput = Get-QwinstaOutputPS5 -ComputerName $ComputerName
-        if ($qwinstaOutput) {
-            $sessions += Parse-QwinstaOutputPS5 -Output $qwinstaOutput
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName               = "cmd.exe"
+        $psi.UseShellExecute        = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError  = $true
+        $psi.CreateNoWindow         = $true
+
+        # OEM 437 — чистый ASCII, состояния будут на английском
+        $psi.StandardOutputEncoding = [System.Text.Encoding]::GetEncoding(437)
+        $psi.StandardErrorEncoding  = [System.Text.Encoding]::GetEncoding(437)
+
+        if ($ComputerName -ne $env:COMPUTERNAME) {
+            $psi.Arguments = "/c chcp 437 >nul 2>&1 & qwinsta /server:$ComputerName"
+        } else {
+            $psi.Arguments = "/c chcp 437 >nul 2>&1 & qwinsta"
         }
-        
-        # Method 2: query session (fallback)
-        if ($sessions.Count -eq 0) {
-            $queryOutput = Get-QuerySessionOutputPS5 -ComputerName $ComputerName
-            if ($queryOutput) {
-                $sessions += Parse-QuerySessionOutputPS5 -Output $queryOutput
-            }
+
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $psi
+
+        if ($process.Start()) {
+            $output = $process.StandardOutput.ReadToEnd()
+            $process.WaitForExit()
+            return $output
         }
-        
-        # Method 3: WMI/CIM (last resort)
-        if ($sessions.Count -eq 0) {
-            $cimSessions = Get-CimSessionsPS5 -ComputerName $ComputerName
-            if ($cimSessions) {
-                $sessions += $cimSessions
-            }
-        }
-        
-        # Clean and normalize
-        $normalizedSessions = @()
-        foreach ($session in $sessions) {
-            # Ensure user name is not empty
-            if ([string]::IsNullOrWhiteSpace($session.UserName) -or $session.UserName -eq "0") {
-                $session.UserName = "SYSTEM"
-            }
-            
-            # Final state normalization
-            if ($session.State -match "Активно|Active|Conn|Connected") {
-                $session.State = "Active"
-            } elseif ($session.State -match "Диск|Disc|Disconnected") {
-                $session.State = "Disconnected"
-            } elseif ($session.State -match "Прием|Listen") {
-                $session.State = "Listen"
-            }
-            
-            $normalizedSessions += $session
-        }
-        
-        $sessions = $normalizedSessions
-        
-        # Extended information
-        if ($ExtendedInfo) {
-            $sessions = Add-ExtendedInfoPS5 -Sessions $sessions -ComputerName $ComputerName
-        }
-        
-        Write-DebugLog "PS5.1: Found $($sessions.Count) sessions" "SUCCESS"
-        
+
+        return $null
+
     } catch {
-        Write-DebugLog "Error in Get-RDPSessionsPS5: $_" "ERROR"
+        Write-DebugLog "qwinsta (PS5, chcp437) failed: $_" "DEBUG"
+        try {
+            if ($ComputerName -eq $env:COMPUTERNAME) {
+                return (qwinsta 2>$null)
+            } else {
+                return (qwinsta /server:$ComputerName 2>$null)
+            }
+        } catch {
+            return $null
+        }
     }
-    
-    return $sessions
 }
 
 function Get-QwinstaOutputPS5 {
@@ -543,7 +517,7 @@ function Parse-QwinstaOutputPS5 {
     
     foreach ($line in $lines) {
         # Skip headers
-        if ($line -match 'СЕАНС|SESSIONNAME|SESSION|^[-=]+$' -or [string]::IsNullOrWhiteSpace($line)) {
+        if ($line -match 'РЎР•РђРќРЎ|SESSIONNAME|SESSION|^[-=]+$' -or [string]::IsNullOrWhiteSpace($line)) {
             continue
         }
         
@@ -626,9 +600,9 @@ function Parse-QwinstaLinePS5 {
             
             # Normalize Russian states
             switch ($state) {
-                "Активно" { $state = "Active" }
-                "Диск" { $state = "Disconnected" }
-                "Прием" { $state = "Listen" }
+                "РђРєС‚РёРІРЅРѕ" { $state = "Active" }
+                "Р”РёСЃРє" { $state = "Disconnected" }
+                "РџСЂРёРµРј" { $state = "Listen" }
                 default {
                     if ($state -match "Active|Conn|Connected") {
                         $state = "Active"
@@ -755,11 +729,11 @@ function Get-RDPSessionsPS7 {
             }
             
             # Final state normalization
-            if ($session.State -match "Активно|Active|Conn|Connected") {
+            if ($session.State -match "РђРєС‚РёРІРЅРѕ|Active|Conn|Connected") {
                 $session.State = "Active"
-            } elseif ($session.State -match "Диск|Disc|Disconnected") {
+            } elseif ($session.State -match "Р”РёСЃРє|Disc|Disconnected") {
                 $session.State = "Disconnected"
-            } elseif ($session.State -match "Прием|Listen") {
+            } elseif ($session.State -match "РџСЂРёРµРј|Listen") {
                 $session.State = "Listen"
             }
             
@@ -786,53 +760,51 @@ function Get-RDPSessionsPS7 {
 
 function Get-QwinstaOutputPS7 {
     param([string]$ComputerName)
-    
+
     try {
-        # Use proper encoding for Russian Windows
+        # Запускаем cmd /c "chcp 437 >nul & qwinsta" — переключаем в English OEM437
+        # чтобы qwinsta выдавал ASCII-состояния (Active, Listen, Disc) без кириллицы
         $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = "qwinsta"
+        $psi.FileName               = "cmd.exe"
+        $psi.UseShellExecute        = $false
         $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $true
-        $psi.UseShellExecute = $false
-        $psi.CreateNoWindow = $true
-        
-        # Set OEM 866 encoding for Russian console output
-        $psi.StandardOutputEncoding = [System.Text.Encoding]::GetEncoding(866)
-        $psi.StandardErrorEncoding = [System.Text.Encoding]::GetEncoding(866)
-        
+        $psi.RedirectStandardError  = $true
+        $psi.CreateNoWindow         = $true
+
+        # OEM 437 — английская кодовая страница, состояния будут ASCII
+        $psi.StandardOutputEncoding = [System.Text.Encoding]::GetEncoding(437)
+        $psi.StandardErrorEncoding  = [System.Text.Encoding]::GetEncoding(437)
+
         if ($ComputerName -ne $env:COMPUTERNAME) {
-            $psi.Arguments = "/server:$ComputerName"
+            $psi.Arguments = "/c chcp 437 >nul 2>&1 & qwinsta /server:$ComputerName"
+        } else {
+            $psi.Arguments = "/c chcp 437 >nul 2>&1 & qwinsta"
         }
-        
+
         $process = New-Object System.Diagnostics.Process
         $process.StartInfo = $psi
-        
+
         if ($process.Start()) {
             $output = $process.StandardOutput.ReadToEnd()
             $process.WaitForExit()
-            
-            # Convert from OEM 866 to UTF-8 for proper display
-            $bytes = [System.Text.Encoding]::GetEncoding(866).GetBytes($output)
-            $output = [System.Text.Encoding]::UTF8.GetString($bytes)
-            
+            Write-DebugLog "qwinsta raw output length: $($output.Length)" "DEBUG"
             return $output
         }
-        
+
         return $null
-        
+
     } catch {
-        Write-DebugLog "qwinsta failed in PS7+: $_" "DEBUG"
-        
-        # Fallback method
+        Write-DebugLog "qwinsta (PS7, chcp437) failed: $_" "DEBUG"
+
+        # Fallback: прямой вызов без переключения кодировки
         try {
             if ($ComputerName -eq $env:COMPUTERNAME) {
-                $output = qwinsta 2>&1 | Out-String
+                return (qwinsta 2>&1 | Out-String)
             } else {
-                $output = qwinsta /server:$ComputerName 2>&1 | Out-String
+                return (qwinsta /server:$ComputerName 2>&1 | Out-String)
             }
-            return $output
         } catch {
-            Write-DebugLog "Fallback method also failed: $_" "WARNING"
+            Write-DebugLog "Fallback qwinsta also failed: $_" "WARNING"
             return $null
         }
     }
@@ -843,12 +815,12 @@ function Fix-RussianEncoding {
     
     # Common Russian words to detect encoding issues
     $russianPatterns = @{
-        'СЕАНС' = 'сеанс'
-        'ПОЛЬЗОВАТЕЛЬ' = 'пользователь'
-        'СОСТОЯНИЕ' = 'состояние'
-        'Активно' = 'активно'
-        'Диск' = 'диск'
-        'Прием' = 'прием'
+        'РЎР•РђРќРЎ' = 'СЃРµР°РЅСЃ'
+        'РџРћР›Р¬Р—РћР’РђРўР•Р›Р¬' = 'РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ'
+        'РЎРћРЎРўРћРЇРќРР•' = 'СЃРѕСЃС‚РѕСЏРЅРёРµ'
+        'РђРєС‚РёРІРЅРѕ' = 'Р°РєС‚РёРІРЅРѕ'
+        'Р”РёСЃРє' = 'РґРёСЃРє'
+        'РџСЂРёРµРј' = 'РїСЂРёРµРј'
     }
     
     # Try different encodings
@@ -917,8 +889,8 @@ function Parse-QwinstaOutputPS7 {
     # Manual parsing approach for Russian output
     foreach ($line in $lines) {
         # Skip headers - support Russian and English headers
-        if ($line -match 'СЕАНС|SESSIONNAME|SESSION|^[-=]+$' -or 
-            $line -match 'ПОЛЬЗОВАТЕЛЬ|USERNAME|USER') {
+        if ($line -match 'РЎР•РђРќРЎ|SESSIONNAME|SESSION|^[-=]+$' -or 
+            $line -match 'РџРћР›Р¬Р—РћР’РђРўР•Р›Р¬|USERNAME|USER') {
             continue
         }
         
@@ -991,9 +963,9 @@ function Parse-QwinstaOutputPS7 {
                 
                 # Normalize Russian state names to English
                 switch ($state) {
-                    "Активно" { $state = "Active" }
-                    "Диск" { $state = "Disconnected" }
-                    "Прием" { $state = "Listen" }
+                    "РђРєС‚РёРІРЅРѕ" { $state = "Active" }
+                    "Р”РёСЃРє" { $state = "Disconnected" }
+                    "РџСЂРёРµРј" { $state = "Listen" }
                     default { 
                         # Try to match common patterns
                         if ($state -match "Active|Conn|Connected") {
@@ -1078,7 +1050,7 @@ function Get-RDPSessions {
     <#
     .SYNOPSIS
         Retrieves RDP sessions with universal parsing for all Windows locales and PowerShell versions
-    
+
     .DESCRIPTION
         Advanced session enumeration supporting:
         - All Windows locales (English, Russian, German, French, Spanish, etc.)
@@ -1086,123 +1058,130 @@ function Get-RDPSessions {
         - Multiple fallback methods with intelligent detection
         - Extended client information
         - Performance optimizations for PS7+
-    
+
     .PARAMETER ComputerName
         Target computer name (default: local computer)
-    
+
     .PARAMETER ExtendedInfo
         Include extended client information (IP, hostname)
-    
+
     .PARAMETER ActiveOnly
         Return only active/connected sessions
-    
+
     .PARAMETER RawOutput
         Return raw session objects without formatting
-    
+
     .EXAMPLE
         Get-RDPSessions
         # List all sessions on local computer
-    
+
     .EXAMPLE
         Get-RDPSessions -ComputerName "SERVER01" -ActiveOnly
         # List active sessions on remote server
-    
+
     .EXAMPLE
         Get-RDPSessions -ExtendedInfo -RawOutput | Export-Csv "sessions.csv"
         # Export detailed session information
-    
+
     .OUTPUTS
         PSCustomObject[] with session properties
     #>
-    
+
     [CmdletBinding()]
     param(
         [Parameter()]
         [string]$ComputerName = $env:COMPUTERNAME,
-        
+
         [Parameter()]
         [switch]$ExtendedInfo,
-        
+
         [Parameter()]
         [switch]$ActiveOnly,
-        
+
         [Parameter()]
         [switch]$RawOutput
     )
-    
+
     begin {
         Write-DebugLog "Retrieving RDP sessions from $ComputerName..." "INFO" @{
-            ComputerName = $ComputerName
-            ExtendedInfo = $ExtendedInfo
-            ActiveOnly = $ActiveOnly
+            ComputerName     = $ComputerName
+            ExtendedInfo     = $ExtendedInfo
+            ActiveOnly       = $ActiveOnly
             PowerShellVersion = $PSVersionTable.PSVersion
-            Culture = [System.Threading.Thread]::CurrentThread.CurrentCulture.Name
-            CurrentEncoding = [System.Text.Encoding]::Default.EncodingName
+            Culture          = [System.Threading.Thread]::CurrentThread.CurrentCulture.Name
+            CurrentEncoding  = [System.Text.Encoding]::Default.EncodingName
         }
-        
+
         # Determine if running in PowerShell 7+
         $IsPS7Plus = $PSVersionTable.PSVersion.Major -ge 7
-        
+
         # Cache for quick access to states
-        $activeStates = @("Active", "Conn", "Connected", "Активно")
-        
+        $activeStates = @("Active", "Conn", "Connected")
+
         # Dictionary for state normalization (include Russian states)
         $stateNormalization = @{
-            # English and other languages states to normalized English states
-            "Active" = "Active"
-            "Conn" = "Active"
-            "Connected" = "Active"
-            "Disc" = "Disconnected"
+            "Active"       = "Active"
+            "Conn"         = "Active"
+            "Connected"    = "Active"
+            "Disc"         = "Disconnected"
             "Disconnected" = "Disconnected"
-            "Listen" = "Listen"
-            "Aktiv" = "Active"
-            "Verbunden" = "Active"
-            "Getrennt" = "Disconnected"
-            "Actif" = "Active"
-            "Activo" = "Active"
-            # Russian states
-            "Активно" = "Active"
-            "Диск" = "Disconnected"
-            "Отключено" = "Disconnected"
-            "Прием" = "Listen"
-            "Ожидание" = "Listen"
+            "Listen"       = "Listen"
+            "Aktiv"        = "Active"
+            "Verbunden"    = "Active"
+            "Getrennt"     = "Disconnected"
+            "Actif"        = "Active"
+            "Activo"       = "Active"
         }
     }
-    
+
     process {
         try {
-            # Use different implementations for PS5.1 and PS7+
+            # ---------------------------------------------------------------
+            # FIX: renamed local variable from $sessions to $rdpSessionList
+            # to avoid collision with the script-level [switch]$Sessions param
+            # ---------------------------------------------------------------
             if ($IsPS7Plus) {
-                $sessions = Get-RDPSessionsPS7 @PSBoundParameters
+                $rdpSessionList = Get-RDPSessionsPS7 `
+                    -ComputerName $ComputerName `
+                    -ExtendedInfo:([bool]$ExtendedInfo.IsPresent)
             } else {
-                $sessions = Get-RDPSessionsPS5 @PSBoundParameters
+                $rdpSessionList = Get-RDPSessionsPS5 `
+                    -ComputerName $ComputerName `
+                    -ExtendedInfo:([bool]$ExtendedInfo.IsPresent)
             }
-            
-            # Filter active sessions if requested
+
+            # Guarantee we always work with an array
+            if ($null -eq $rdpSessionList) { $rdpSessionList = @() }
+            [array]$rdpSessionList = @($rdpSessionList)
+
+            Write-DebugLog "Raw session count from sub-function: $($rdpSessionList.Count)" "DEBUG"
+
+            # Apply ActiveOnly filter if requested
             if ($ActiveOnly) {
-                $filteredSessions = $sessions | Where-Object {
+                $filteredList = @($rdpSessionList | Where-Object {
                     $_.State -in $activeStates -or $_.State -eq "Active"
-                }
-                Write-DebugLog "Filtered to $($filteredSessions.Count) active sessions" "DEBUG"
-                $sessions = $filteredSessions
+                })
+                Write-DebugLog "Filtered to $($filteredList.Count) active sessions" "DEBUG"
+                $rdpSessionList = $filteredList
             }
-            
-            # Return result
+
+            # Return raw or sorted output
             if ($RawOutput) {
-                return $sessions
+                return $rdpSessionList
             } else {
-                return $sessions | Sort-Object -Property SessionId
+                return @($rdpSessionList | Sort-Object -Property SessionId)
             }
-            
+
         } catch {
             Write-DebugLog "Error in Get-RDPSessions: $($_.Exception.Message)" "ERROR" @{
-                Exception = $_.Exception
+                Exception  = $_.Exception
                 StackTrace = $_.ScriptStackTrace
             }
             return @()
         }
     }
 }
+
 
 function Parse-QwinstaOutputPS7 {
     param([string]$Output)
@@ -2931,14 +2910,14 @@ function Show-SystemStatus {
         # Define colors based on PS version
         if ($IsPS7Plus) {
             # PowerShell 7+ supports ANSI colors and $PSStyle
-            $Color = @{
-                Header = "Cyan"
-                Success = "Green"
-                Warning = "Yellow"
-                Error = "Red"
-                Info = "Cyan"
-                Debug = "Gray"
-                Reset = ""
+$Color = @{
+    Header  = "`e[96m"   # Bright Cyan
+    Success = "`e[92m"   # Bright Green
+    Warning = "`e[93m"   # Bright Yellow
+    Error   = "`e[91m"   # Bright Red
+    Info    = "`e[96m"   # Bright Cyan
+    Debug   = "`e[90m"   # Dark Gray
+    Reset   = "`e[0m"    # Reset all
             }
         } else {
             # PowerShell 5.1 fallback colors
@@ -3041,9 +3020,15 @@ function Get-OSVersionInfoPS5 {
         }
     } catch {
         return @{
-            Version = "Unknown"
-            Caption = "Error retrieving OS info"
-            Error = $_.Exception.Message
+        Version        = "Unknown"
+        Caption        = "Error retrieving OS info"
+        BuildNumber    = "0"
+        IsServer       = $false
+        Architecture   = "Unknown"
+        LastBootTime   = $null
+        TotalMemoryGB  = 0
+        CollectionTime = Get-Date
+        Error          = $_.Exception.Message
         }
     }
 }
@@ -3375,10 +3360,10 @@ function Show-StatusReportPS5 {
     
     # Section 8: Recommendations
     Write-Host "`n[8] RECOMMENDATIONS" -ForegroundColor $Color.Header
-    if ($StatusData.Recommendations.Count -eq 0) {
+    if ($safeRecs.Count -eq 0) {
         Write-Host "   No issues detected. System appears to be properly configured." -ForegroundColor $Color.Success
     } else {
-        foreach ($recommendation in $StatusData.Recommendations) {
+        foreach ($recommendation in $safeRecs) {
             Write-Host "   * $recommendation" -ForegroundColor $Color.Warning
         }
     }
@@ -3760,207 +3745,445 @@ function Get-PerformanceMetricsPS7 {
     }
 }
 
+# Author: Mikhail Deynekin (mid1977@gmail.com)
+# Site:   https://deynekin.com
+# Desc:   Show-StatusReportPS7 — two-column grid status report renderer.
+#         Depends on: Format-Cell, Format-CellPair, Format-SectionDataPS7,
+#                     Format-PercentageBar, Show-BriefStatusPS7
+
 function Show-StatusReportPS7 {
     param(
-        $StatusData,
-        [switch]$Brief,
-        $Color
+        [Parameter(Mandatory)] $StatusData,
+        [switch]               $Brief,
+        [Parameter(Mandatory)] $Color      # hashtable with ANSI escape keys
     )
-    
-    # Clear screen and show header with ANSI colors (PS7+)
-    Clear-Host
-    
-    Write-Host "`n$($Color.Header)+==============================================================+$($Color.Reset)"
-    Write-Host "$($Color.Header)|   REMOTE SESSION MANAGER PRO - SYSTEM STATUS REPORT   |$($Color.Reset)"
-    Write-Host "$($Color.Header)+==============================================================+$($Color.Reset)"
-    
-    # Summary line with color indicators
-    $statusEmoji = if ($StatusData.Recommendations.Count -eq 0) { "[OK]" } else { "[!]" }
-    Write-Host "`n$statusEmoji Status: $($Color.Info)Generated $($StatusData.OSVersion.CollectionTime)$($Color.Reset)"
-    Write-Host "   |-- Computer: $($Color.Debug)$env:COMPUTERNAME$($Color.Reset) | User: $($Color.Debug)$([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)$($Color.Reset) | PS: $($Color.Debug)$($PSVersionTable.PSVersion)$($Color.Reset) | Admin: $(if ($StatusData.IsAdministrator) { "$($Color.Success)Yes" } else { "$($Color.Error)No" })$($Color.Reset)"
-    
+
+    $C = $Color
+    $R = $C.Reset
+
+    # -- Grid geometry ---------------------------------------------------------
+    # Column width: 34 visible chars each, border char on each side
+    # Total line: "| " + 34 + " | " + 34 + " |" = 74 chars
+    $W      = 34                              # cell content width
+    $hLine  = '+' + ('-' * ($W + 2)) + '+' + ('-' * ($W + 2)) + '+'   # +----+----+
+    $hTitle = '+' + ('=' * 62) + '+'                                    # +====...+
+
+    # -- Collection time -------------------------------------------------------
+    $collectionTime = if ($StatusData.OSVersion -and $StatusData.OSVersion.CollectionTime) {
+        $StatusData.OSVersion.CollectionTime.ToString('yyyy-MM-dd HH:mm:ss')
+    } else {
+        (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    }
+
+    # -- Recommendations (safe array) ------------------------------------------
+    [string[]]$safeRecs = if ($StatusData.Recommendations -is [array]) {
+        $StatusData.Recommendations
+    } elseif ($StatusData.Recommendations) {
+        @($StatusData.Recommendations)
+    } else {
+        @()
+    }
+
+    # -- Helper: print a grid row with two colored cells -----------------------
+    # line1 / line2 must already be exactly $W visible chars (from Format-SectionDataPS7)
+    $printRow = {
+        param([string]$l1, [string]$l2)
+        Write-Host "$($C.Header)|$R $l1 $($C.Header)|$R $l2 $($C.Header)|$R"
+    }
+
+    # -------------------------------------------------------------------------
+    # HEADER
+    # -------------------------------------------------------------------------
+    $title       = ' REMOTE SESSION MANAGER PRO - SYSTEM STATUS REPORT '
+    $titlePadded = $title.PadRight(62)
+
+    Write-Host ''
+    Write-Host "$($C.Header)$hTitle$R"
+    Write-Host "$($C.Header)|$R$($C.Info)$titlePadded$R$($C.Header)|$R"
+    Write-Host "$($C.Header)$hTitle$R"
+    Write-Host ''
+
+    # Status summary line
+    $statusEmoji = if ($safeRecs.Count -eq 0) { '[OK]' } else { '[!]' }
+    $emojiColor  = if ($safeRecs.Count -eq 0) { $C.Success } else { $C.Warning }
+    $adminText   = if ($StatusData.IsAdministrator) { "$($C.Success)Yes$R" } else { "$($C.Error)No$R" }
+
+    Write-Host "$emojiColor$statusEmoji$R Status: $($C.Info)Generated $collectionTime$R"
+    Write-Host "   |-- Computer: $($C.Debug)$env:COMPUTERNAME$R | User: $($C.Debug)$([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)$R | PS: $($C.Debug)$($PSVersionTable.PSVersion)$R | Admin: $adminText"
+
+    # Brief mode — show compact summary and exit
     if ($Brief) {
-        Write-Host "`n$($Color.Warning)[Brief Mode - Showing Summary Only]$($Color.Reset)"
-        Show-BriefStatusPS7 -StatusData $StatusData -Color $Color
+        Write-Host "`n$($C.Warning)[Brief Mode - Showing Summary Only]$R"
+        Show-BriefStatusPS7 -StatusData $StatusData -Color $C
         return
     }
-    
-    # Create a grid layout for better visualization
+
+    # -------------------------------------------------------------------------
+    # TWO-COLUMN DATA GRID
+    # -------------------------------------------------------------------------
     $gridSections = @(
-        @{ Title = "Windows Version"; Data = $StatusData.OSVersion }
-        @{ Title = "RDP Configuration"; Data = $StatusData.RDPConfiguration }
-        @{ Title = "Shadow Configuration"; Data = $StatusData.ShadowConfiguration }
-        @{ Title = "Firewall Status"; Data = $StatusData.FirewallStatus }
-        @{ Title = "Service Status"; Data = $StatusData.ServiceStatus }
-        @{ Title = "Active Sessions"; Data = $StatusData.ActiveSessions }
+        @{ Title = 'Windows Version';      Data = $StatusData.OSVersion          }
+        @{ Title = 'RDP Configuration';    Data = $StatusData.RDPConfiguration   }
+        @{ Title = 'Shadow Configuration'; Data = $StatusData.ShadowConfiguration}
+        @{ Title = 'Firewall Status';      Data = $StatusData.FirewallStatus      }
+        @{ Title = 'Service Status';       Data = $StatusData.ServiceStatus       }
+        @{ Title = 'Active Sessions';      Data = $StatusData.ActiveSessions      }
     )
-    
-    # Display sections in a two-column layout
+
     for ($i = 0; $i -lt $gridSections.Count; $i += 2) {
-        Write-Host "`n$($Color.Header)+------------------------------------+------------------------------------+$($Color.Reset)"
-        
-        # First column
-        $section1 = $gridSections[$i]
-        $section1Title = $section1.Title.PadRight(34)
-        Write-Host "$($Color.Header)|$($Color.Reset) $($Color.Info)$section1Title$($Color.Reset) $($Color.Header)|$($Color.Reset) " -NoNewline
-        
-        # Second column (if exists)
-        if ($i + 1 -lt $gridSections.Count) {
-            $section2 = $gridSections[$i + 1]
-            $section2Title = $section2.Title.PadRight(34)
-            Write-Host "$($Color.Info)$section2Title$($Color.Reset) $($Color.Header)|$($Color.Reset)"
+        $sec1 = $gridSections[$i]
+        $sec2 = if ($i + 1 -lt $gridSections.Count) { $gridSections[$i + 1] } else { $null }
+
+        # Section title row
+        $t1 = $sec1.Title.PadRight($W)
+        $t2 = if ($sec2) { $sec2.Title.PadRight($W) } else { ' ' * $W }
+
+        Write-Host ''
+        Write-Host "$($C.Header)$hLine$R"
+        Write-Host "$($C.Header)|$R $($C.Info)$t1$R $($C.Header)|$R $($C.Info)$t2$R $($C.Header)|$R"
+        Write-Host "$($C.Header)$hLine$R"
+
+        # Data rows
+        [string[]]$lines1 = Format-SectionDataPS7 -Section $sec1 -Color $C
+        [string[]]$lines2 = if ($sec2) {
+            Format-SectionDataPS7 -Section $sec2 -Color $C
         } else {
-            Write-Host " ".PadRight(34) + " $($Color.Header)|$($Color.Reset)"
+            @((' ' * $W), (' ' * $W), (' ' * $W), (' ' * $W))
         }
-        
-        Write-Host "$($Color.Header)+------------------------------------+------------------------------------+$($Color.Reset)"
-        
-        # Display section data
-        $lines1 = Format-SectionDataPS7 -Section $section1 -Color $Color
-        $lines2 = if ($i + 1 -lt $gridSections.Count) { 
-            Format-SectionDataPS7 -Section $gridSections[$i + 1] -Color $Color 
-        } else { @() }
-        
-        $maxLines = [Math]::Max($lines1.Count, $lines2.Count)
-        for ($j = 0; $j -lt $maxLines; $j++) {
-            $line1 = if ($j -lt $lines1.Count) { $lines1[$j] } else { "".PadRight(34) }
-            $line2 = if ($j -lt $lines2.Count) { $lines2[$j] } else { "".PadRight(34) }
-            
-            Write-Host "$($Color.Header)|$($Color.Reset) $line1 $($Color.Header)|$($Color.Reset) $line2 $($Color.Header)|$($Color.Reset)"
+
+        $rowCount = [Math]::Max($lines1.Count, $lines2.Count)
+        for ($j = 0; $j -lt $rowCount; $j++) {
+            $l1 = if ($j -lt $lines1.Count) { $lines1[$j] } else { ' ' * $W }
+            $l2 = if ($j -lt $lines2.Count) { $lines2[$j] } else { ' ' * $W }
+            & $printRow $l1 $l2
         }
-        
-        Write-Host "$($Color.Header)+------------------------------------+------------------------------------+$($Color.Reset)"
+
+        Write-Host "$($C.Header)$hLine$R"
     }
-    
-    # Performance Metrics Section
+
+    # -------------------------------------------------------------------------
+    # PERFORMANCE METRICS (optional)
+    # -------------------------------------------------------------------------
     if ($StatusData.PerformanceMetrics -and -not $StatusData.PerformanceMetrics.Error) {
-        Write-Host "`n$($Color.Header)+==============================================================+$($Color.Reset)"
-        Write-Host "$($Color.Header)|$($Color.Reset) $($Color.Info)Performance Metrics$($Color.Reset)" -NoNewline
-        Write-Host " ".PadRight(52) + "$($Color.Header)|$($Color.Reset)"
-        Write-Host "$($Color.Header)+==============================================================+$($Color.Reset)"
-        
-        $cpuBar = Format-PercentageBar -Percentage $StatusData.PerformanceMetrics.CPUUsagePercent -Color $Color
-        $memoryBar = Format-PercentageBar -Percentage $StatusData.PerformanceMetrics.MemoryUsagePercent -Color $Color
-        
-        Write-Host "$($Color.Header)|$($Color.Reset) CPU:    $cpuBar $($StatusData.PerformanceMetrics.CPUUsagePercent.ToString("0.0").PadLeft(5))%" -NoNewline
-        Write-Host " ".PadRight(18) + "$($Color.Header)|$($Color.Reset)"
-        
-        Write-Host "$($Color.Header)|$($Color.Reset) Memory: $memoryBar $($StatusData.PerformanceMetrics.MemoryUsagePercent.ToString("0.0").PadLeft(5))%" -NoNewline
-        Write-Host " ".PadRight(18) + "$($Color.Header)|$($Color.Reset)"
-        
-        Write-Host "$($Color.Header)+==============================================================+$($Color.Reset)"
+        $pm       = $StatusData.PerformanceMetrics
+        $perfLine = '+' + ('=' * 62) + '+'
+        $perfLabel= ' Performance Metrics'.PadRight(62)
+
+        Write-Host ''
+        Write-Host "$($C.Header)$perfLine$R"
+        Write-Host "$($C.Header)|$R$($C.Info)$perfLabel$R$($C.Header)|$R"
+        Write-Host "$($C.Header)$perfLine$R"
+
+        $cpuBar = Format-PercentageBar -Percentage $pm.CPUUsagePercent    -Color $C
+        $memBar = Format-PercentageBar -Percentage $pm.MemoryUsagePercent -Color $C
+
+        $cpuPct = $pm.CPUUsagePercent.ToString('0.0').PadLeft(5)
+        $memPct = $pm.MemoryUsagePercent.ToString('0.0').PadLeft(5)
+
+        Write-Host "$($C.Header)|$R CPU:    $cpuBar $cpuPct% $($C.Debug)[$($pm.TotalMemoryGB) GB total]$R"
+        Write-Host "$($C.Header)|$R Memory: $memBar $memPct%"
+
+        if ($pm.DiskUsage) {
+            foreach ($disk in $pm.DiskUsage) {
+                $diskText = "$($disk.DeviceID) $($disk.UsedPercent)% used — $($disk.FreeGB) GB free of $($disk.SizeGB) GB"
+                Write-Host "$($C.Header)|$R $($C.Debug)Disk: $diskText$R"
+            }
+        }
+
+        Write-Host "$($C.Header)$perfLine$R"
     }
-    
-    # Recommendations Section
-    Write-Host "`n$($Color.Header)+==============================================================+$($Color.Reset)"
-    Write-Host "$($Color.Header)|   RECOMMENDATIONS                                               |$($Color.Reset)"
-    Write-Host "$($Color.Header)+==============================================================+$($Color.Reset)"
-    
-    if ($StatusData.Recommendations.Count -eq 0) {
-        Write-Host "   $($Color.Success)[OK] No issues detected. System is properly configured.$($Color.Reset)"
+
+    # -------------------------------------------------------------------------
+    # RECOMMENDATIONS
+    # -------------------------------------------------------------------------
+    $recTitle   = ' RECOMMENDATIONS'
+    $recTitlePd = $recTitle.PadRight(62)
+
+    Write-Host ''
+    Write-Host "$($C.Header)$hTitle$R"
+    Write-Host "$($C.Header)|$R$($C.Info)$recTitlePd$R$($C.Header)|$R"
+    Write-Host "$($C.Header)$hTitle$R"
+
+    if ($safeRecs.Count -eq 0) {
+        Write-Host "   $($C.Success)[OK] No issues detected. System is properly configured.$R"
     } else {
-        foreach ($recommendation in $StatusData.Recommendations) {
-            Write-Host "   $($Color.Warning)*$($Color.Reset) $recommendation"
+        foreach ($rec in $safeRecs) {
+            Write-Host "   $($C.Warning)*$R $rec"
         }
     }
-    
-    # Footer
+
+    # -------------------------------------------------------------------------
+    # FOOTER
+    # -------------------------------------------------------------------------
     $generationTime = $StatusData.GenerationTime
-    $timeColor = if ($generationTime -lt 100) { $Color.Success } elseif ($generationTime -lt 500) { $Color.Info } else { $Color.Warning }
-    
-    Write-Host "`n$($Color.Debug)-" * 70 + $Color.Reset
-    Write-Host "$($Color.Info)Report generated in $($timeColor)$generationTime$($Color.Info) ms$($Color.Reset) | $(Get-Date -Format 'HH:mm:ss')$($Color.Reset)"
-    Write-Host "$($Color.Debug)-" * 70 + $Color.Reset
+    $timeColor      = if     ($generationTime -lt 100)  { $C.Success }
+                      elseif ($generationTime -lt 500)  { $C.Info    }
+                      elseif ($generationTime -lt 2000) { $C.Warning }
+                      else                              { $C.Error   }
+
+    $separator = '-' * 70
+
+    Write-Host ''
+    Write-Host "$($C.Debug)$separator$R"
+    Write-Host "$($C.Info)Report generated in $($timeColor)$generationTime$($C.Info) ms$R | $($C.Debug)$(Get-Date -Format 'HH:mm:ss')$R"
+    Write-Host "$($C.Debug)$separator$R"
 }
 
+# -----------------------------------------------------------------------------
+# HELPER: Format-Cell
+# Builds a fixed-width grid cell with correct alignment.
+# PadRight is applied to the PLAIN text BEFORE wrapping in ANSI codes,
+# so escape sequences never distort column widths.
+# -----------------------------------------------------------------------------
+function Format-Cell {
+    [OutputType([string])]
+    param(
+        [string] $Text,                 # plain text (no ANSI inside)
+        [string] $ColorCode  = '',      # ANSI open  e.g. "`e[90m"
+        [string] $ResetCode  = '',      # ANSI close e.g. "`e[0m"
+        [int]    $Width      = 34,      # visible character width of the cell
+        [switch] $TruncateWithEllipsis  # cut long values instead of wrapping
+    )
+
+    # Guarantee non-null
+    if ($null -eq $Text) { $Text = '' }
+
+    # Truncate if requested and text is too long
+    if ($TruncateWithEllipsis -and $Text.Length -gt $Width) {
+        $Text = $Text.Substring(0, $Width - 3) + '...'
+    }
+
+    # PadRight on plain text — correct visible width every time
+    $padded = $Text.PadRight($Width)
+
+    return "${ColorCode}${padded}${ResetCode}"
+}
+
+# -----------------------------------------------------------------------------
+# HELPER: Format-CellPair
+# Convenience wrapper: label in Debug color, value in a separate color.
+# Returns a single 34-char cell: "Label: Value          "
+# -----------------------------------------------------------------------------
+function Format-CellPair {
+    [OutputType([string])]
+    param(
+        [string] $Label,
+        [string] $Value,
+        [string] $LabelColor,
+        [string] $ValueColor,
+        [string] $ResetCode  = '',
+        [int]    $Width      = 34
+    )
+
+    if ($null -eq $Value) { $Value = 'N/A' }
+
+    $raw    = "${Label}: ${Value}"
+    $padded = $raw.PadRight($Width)
+    if ($padded.Length -gt $Width) { $padded = $padded.Substring(0, $Width - 3) + '...' }
+
+    # Rebuild with colors but on an already-padded string —
+    # find the colon position in padded text and split there
+    $colonPos = $padded.IndexOf(': ')
+    if ($colonPos -ge 0) {
+        $labelPart = $padded.Substring(0, $colonPos + 2)             # "Label: "
+        $valuePart = $padded.Substring($colonPos + 2)                # "Value      "
+        return "${LabelColor}${labelPart}${ValueColor}${valuePart}${ResetCode}"
+    }
+
+    # Fallback — no colon found
+    return "${LabelColor}${padded}${ResetCode}"
+}
+
+# -----------------------------------------------------------------------------
+# MAIN: Format-SectionDataPS7
+# Returns exactly 4 fixed-width (34 chars) colored strings per section.
+# Each string is ready to drop directly into the two-column grid renderer.
+# -----------------------------------------------------------------------------
 function Format-SectionDataPS7 {
-    param($Section, $Color)
-    
-    $lines = @()
-    $data = $Section.Data
-    
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory)] $Section,
+        [Parameter(Mandatory)] $Color    # hashtable: Header/Success/Warning/Error/Info/Debug/Reset
+    )
+
+    # Column width — must match the +----...----+ border in Show-StatusReportPS7
+    $W  = 34
+    $C  = $Color
+    $R  = $C.Reset
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $data  = $Section.Data
+
+    # -- Inline helpers scoped to this call -----------------------------------
+
+    # Safe string: converts $null / DBNull to a displayable string
+    $safe = { param($v, $fallback = 'N/A')
+        if ($null -eq $v -or $v -is [System.DBNull]) { $fallback } else { "$v" }
+    }
+
+    # Error line: full-width red error message
+    $errLine = {
+        Format-Cell -Text "ERR: $($data.Error)" -ColorCode $C.Error `
+                    -ResetCode $R -Width $W -TruncateWithEllipsis
+    }
+
+    # -- Section renderers -----------------------------------------------------
+
     switch ($Section.Title) {
-        "Windows Version" {
+
+        #----------------------------------------------------------------------
+        'Windows Version' {
             if ($data.Error) {
-                $lines += "$($Color.Error)$($data.Error.PadRight(34))$($Color.Reset)"
+                $lines.Add((& $errLine))
             } else {
-                $lines += "$($Color.Debug)Ver: $($data.Version.PadRight(28))$($Color.Reset)"
-                $lines += "$($Color.Debug)Build: $($data.BuildNumber.PadRight(28))$($Color.Reset)"
-                $lines += "$($Color.Debug)Arch: $($data.Architecture.PadRight(28))$($Color.Reset)"
-                $lines += "$($Color.Debug)Server: $(($data.IsServer.ToString()).PadRight(28))$($Color.Reset)"
+                $arch = (& $safe $data.Architecture)
+                # Shorten "64-разрядная" > "64-bit" etc. for column fit
+                $arch = $arch -replace '64-разрядная','64-bit' `
+                              -replace '32-разрядная','32-bit'
+
+                $lines.Add((Format-CellPair 'Ver'    (& $safe $data.Version)     $C.Debug $C.Debug $R $W))
+                $lines.Add((Format-CellPair 'Build'  (& $safe $data.BuildNumber) $C.Debug $C.Debug $R $W))
+                $lines.Add((Format-CellPair 'Arch'   $arch                       $C.Debug $C.Debug $R $W))
+                $lines.Add((Format-CellPair 'Server' (& $safe $data.IsServer)    $C.Debug $C.Debug $R $W))
             }
         }
-        "RDP Configuration" {
+
+        #----------------------------------------------------------------------
+        'RDP Configuration' {
             if ($data.Error) {
-                $lines += "$($Color.Error)$($data.Error.PadRight(34))$($Color.Reset)"
+                $lines.Add((& $errLine))
             } else {
-                $rdpStatus = if ($data.RDPEnabled) { "$($Color.Success)Enabled" } else { "$($Color.Error)Disabled" }
-                $lines += "$($Color.Debug)Status: $($rdpStatus.PadRight(26))$($Color.Reset)"
-                $lines += "$($Color.Debug)Max: $($data.MaxInstanceCount.ToString().PadRight(30))$($Color.Reset)"
-                $lines += "$($Color.Debug)KeepAlive: $($data.KeepAliveInterval.ToString().PadRight(24))$($Color.Reset)"
+                $rdpEnabled = $data.RDPEnabled
+                $rdpText    = if ($rdpEnabled) { 'Enabled'  } else { 'Disabled' }
+                $rdpColor   = if ($rdpEnabled) { $C.Success } else { $C.Error   }
+
+                $maxVal  = & $safe $data.MaxInstanceCount
+                $kaVal   = & $safe $data.KeepAliveInterval
+                $rpcVal  = & $safe $data.AllowRemoteRPC
+
+                $lines.Add((Format-CellPair 'Status'    $rdpText $C.Debug $rdpColor $R $W))
+                $lines.Add((Format-CellPair 'MaxSess'   $maxVal  $C.Debug $C.Debug  $R $W))
+                $lines.Add((Format-CellPair 'KeepAlive' $kaVal   $C.Debug $C.Debug  $R $W))
+                $lines.Add((Format-CellPair 'RemoteRPC' $rpcVal  $C.Debug $C.Debug  $R $W))
             }
         }
-        "Shadow Configuration" {
+
+        #----------------------------------------------------------------------
+        'Shadow Configuration' {
             if ($data.Error) {
-                $lines += "$($Color.Error)$($data.Error.PadRight(34))$($Color.Reset)"
+                $lines.Add((& $errLine))
             } else {
-                $shadowColor = if ($data.ShadowMode -ge 2) { $Color.Success } else { $Color.Warning }
-                $lines += "$($Color.Debug)Mode: $($shadowColor)$($data.ShadowModeDescription.PadRight(28))$($Color.Reset)"
-                if ($data.LegacyShadowMode) {
-                    $lines += "$($Color.Debug)Legacy: $($data.LegacyShadowMode.ToString().PadRight(28))$($Color.Reset)"
+                $mode      = $data.ShadowMode
+                $modeDesc  = & $safe $data.ShadowModeDescription 'Not Configured'
+                $modeColor = if ($null -ne $mode -and $mode -ge 2) { $C.Success } else { $C.Warning }
+                $legacy    = & $safe $data.LegacyShadowMode ''
+
+                $lines.Add((Format-CellPair 'Mode'   $modeDesc $C.Debug $modeColor $R $W))
+                $lines.Add((Format-CellPair 'Value'  (& $safe $mode)   $C.Debug $C.Debug $R $W))
+
+                if ($legacy -ne '') {
+                    $lines.Add((Format-CellPair 'Legacy' $legacy $C.Debug $C.Debug $R $W))
+                } else {
+                    $lines.Add((Format-Cell '' -Width $W))
                 }
             }
         }
-        "Firewall Status" {
+
+        #----------------------------------------------------------------------
+        'Firewall Status' {
             if ($data.Error) {
-                $lines += "$($Color.Error)$($data.Error.PadRight(34))$($Color.Reset)"
+                $lines.Add((& $errLine))
             } else {
-                $fwStatus = if ($data.FirewallEnabled) { "$($Color.Success)Enabled" } else { "$($Color.Warning)Disabled" }
-                $lines += "$($Color.Debug)Firewall: $($fwStatus.PadRight(26))$($Color.Reset)"
-                
-                $rdpAllowed = if ($data.RDPEnabledInFirewall) { "$($Color.Success)Allowed" } else { "$($Color.Error)Blocked" }
-                $lines += "$($Color.Debug)RDP: $($rdpAllowed.PadRight(30))$($Color.Reset)"
-                $lines += "$($Color.Debug)Rules: $($data.RDPRuleCount.ToString().PadRight(28))$($Color.Reset)"
+                $fwEnabled  = $data.FirewallEnabled
+                $rdpAllow   = $data.RDPEnabledInFirewall
+                $ruleCount  = & $safe $data.RDPRuleCount '0'
+
+                $fwText     = if ($fwEnabled) { 'Enabled'  } else { 'Disabled' }
+                $fwColor    = if ($fwEnabled) { $C.Success } else { $C.Warning  }
+                $rdpText    = if ($rdpAllow)  { 'Allowed'  } else { 'Blocked'  }
+                $rdpColor   = if ($rdpAllow)  { $C.Success } else { $C.Error   }
+
+                $lines.Add((Format-CellPair 'Firewall' $fwText    $C.Debug $fwColor  $R $W))
+                $lines.Add((Format-CellPair 'RDP'      $rdpText   $C.Debug $rdpColor $R $W))
+                $lines.Add((Format-CellPair 'Rules'    $ruleCount $C.Debug $C.Debug  $R $W))
             }
         }
-        "Service Status" {
-            foreach ($service in $data | Select-Object -First 3) {
-                $statusColor = switch ($service.Status) {
-                    "Running" { $Color.Success }
-                    "Stopped" { $Color.Error }
-                    default { $Color.Warning }
+
+        #----------------------------------------------------------------------
+        'Service Status' {
+            $services = @($data | Select-Object -First 4)
+
+            foreach ($svc in $services) {
+                $statusText  = & $safe $svc.Status 'Unknown'
+                $statusColor = switch ($statusText) {
+                    'Running'   { $C.Success }
+                    'Stopped'   { $C.Error   }
+                    'Not Found' { $C.Warning }
+                    default     { $C.Warning }
                 }
-                
-                $displayName = if ($service.DisplayName.Length -gt 20) { 
-                    $service.DisplayName.Substring(0, 17) + "..." 
-                } else { 
-                    $service.DisplayName.PadRight(20) 
+
+                # Shorten display name to leave room for status (9 chars)
+                $maxNameLen  = $W - 11    # "Name: " prefix + status field
+                $displayName = & $safe $svc.DisplayName $svc.Name
+                if ($displayName.Length -gt $maxNameLen) {
+                    $displayName = $displayName.Substring(0, $maxNameLen - 3) + '...'
                 }
-                
-                $lines += "$($Color.Debug)$displayName $($statusColor)$($service.Status.PadRight(9))$($Color.Reset)"
+
+                $raw    = "$displayName $statusText"
+                $padded = $raw.PadRight($W)
+                if ($padded.Length -gt $W) { $padded = $padded.Substring(0, $W - 3) + '...' }
+
+                # Color only the status part
+                $splitAt = $padded.LastIndexOf($statusText)
+                if ($splitAt -gt 0) {
+                    $namePart   = $padded.Substring(0, $splitAt)
+                    $statusPart = $padded.Substring($splitAt)
+                    $lines.Add("${C.Debug}${namePart}${statusColor}${statusPart}${R}")
+                } else {
+                    $lines.Add((Format-Cell $raw -ColorCode $C.Debug -ResetCode $R -Width $W))
+                }
             }
         }
-        "Active Sessions" {
+
+        #----------------------------------------------------------------------
+        'Active Sessions' {
             if ($data.Error) {
-                $lines += "$($Color.Error)$($data.Error.PadRight(34))$($Color.Reset)"
+                $lines.Add((& $errLine))
             } else {
-                $lines += "$($Color.Debug)Total: $($data.TotalSessions.ToString().PadRight(28))$($Color.Reset)"
-                $activeColor = if ($data.ActiveSessions -gt 0) { $Color.Success } else { $Color.Debug }
-                $lines += "$($Color.Debug)Active: $($activeColor)$($data.ActiveSessions.ToString().PadRight(28))$($Color.Reset)"
-                $lines += "$($Color.Debug)Disc: $($data.DisconnectedSessions.ToString().PadRight(29))$($Color.Reset)"
+                $total  = & $safe $data.TotalSessions        '0'
+                $active = & $safe $data.ActiveSessions       '0'
+                $disc   = & $safe $data.DisconnectedSessions '0'
+
+                $activeColor = if ([int]$active -gt 0) { $C.Success } else { $C.Debug }
+
+                $lines.Add((Format-CellPair 'Total'  $total  $C.Debug $C.Debug     $R $W))
+                $lines.Add((Format-CellPair 'Active' $active $C.Debug $activeColor $R $W))
+                $lines.Add((Format-CellPair 'Disc'   $disc   $C.Debug $C.Debug     $R $W))
+
                 if ($data.CurrentSession) {
-                    $lines += "$($Color.Debug)Current: $($Color.Success)ID $($data.CurrentSession.SessionId)$($Color.Reset)"
+                    $curId   = & $safe $data.CurrentSession.SessionId '?'
+                    $curUser = & $safe $data.CurrentSession.UserName   ''
+                    $curText = if ($curUser) { "ID $curId ($curUser)" } else { "ID $curId" }
+                    $lines.Add((Format-CellPair 'Current' $curText $C.Debug $C.Success $R $W))
                 }
             }
         }
+
+        #----------------------------------------------------------------------
+        default {
+            $lines.Add((Format-Cell "Unknown section: $($Section.Title)" `
+                        -ColorCode $C.Warning -ResetCode $R -Width $W `
+                        -TruncateWithEllipsis))
+        }
     }
-    
-    # Ensure we return exactly 4 lines for consistent formatting
+
+    # -- Pad to exactly 4 lines — grid renderer expects a fixed row count ------
     while ($lines.Count -lt 4) {
-        $lines += " ".PadRight(34)
+        $lines.Add((Format-Cell '' -Width $W))
     }
-    
-    return $lines[0..3]
+
+    # Return exactly 4 elements
+    return [string[]]$lines[0..3]
 }
 
 function Format-PercentageBar {
@@ -4076,7 +4299,7 @@ function Export-StatusCsv {
             RDPAllowedInFirewall = $StatusData.FirewallStatus.RDPEnabledInFirewall
             TotalSessions = $StatusData.ActiveSessions.TotalSessions
             ActiveSessions = $StatusData.ActiveSessions.ActiveSessions
-            IssueCount = $StatusData.Recommendations.Count
+            IssueCount = $safeRecs.Count
             GenerationTimeMs = $StatusData.GenerationTime
         }
         
@@ -4936,72 +5159,38 @@ if ($SessionId -ge 0 -or $Sessions -or $Disconnect -or $Logoff -or $Message) {
 
 # Step 7: Handle sessions list request
 if ($Sessions) {
-    $sessions = Get-RDPSessions
-    
-    if ($sessions.Count -eq 0) {
+    $rdpSessionList = Get-RDPSessions
+    if ($rdpSessionList.Count -eq 0) {
         Write-Host "No active sessions found." -ForegroundColor $COLORS.Warning
     } else {
-        # Format session list
-        $sessionTable = $sessions | Format-Table -Property @{
-            Label = "ID"
-            Expression = { $_.SessionId }
-            Width = 4
-            Align = 'Right'
-        },
-        @{
-            Label = "User"
-            Expression = { if ($_.UserName) { $_.UserName } else { "SYSTEM" } }
-            Width = 20
-        },
-        @{
-            Label = "State"
-            Expression = { $_.State }
-            Width = 12
-        },
-        @{
-            Label = "Type"
-            Expression = { $_.Type }
-            Width = 8
-        },
-        @{
-            Label = "Session"
-            Expression = { if ($_.SessionName) { $_.SessionName } else { "N/A" } }
-            Width = 15
-        },
-        @{
-            Label = "Device"
-            Expression = { if ($_.Device) { $_.Device } else { "N/A" } }
-            Width = 10
-        } -AutoSize | Out-String
-        
+        $sessionTable = $rdpSessionList | Format-Table -Property `
+            @{Label="ID";     Expression={$_.SessionId};   Width=4;  Align='Right'},
+            @{Label="User";   Expression={if ($_.UserName) {$_.UserName} else {"SYSTEM"}}; Width=20},
+            @{Label="State";  Expression={$_.State};       Width=12},
+            @{Label="Type";   Expression={$_.Type};        Width=8},
+            @{Label="Session";Expression={if ($_.SessionName) {$_.SessionName} else {"N/A"}}; Width=15},
+            @{Label="Device"; Expression={if ($_.Device) {$_.Device} else {"N/A"}};         Width=10} `
+            -AutoSize | Out-String
+
         Write-Host "ACTIVE SESSIONS:" -ForegroundColor $COLORS.Info
         Write-Host $sessionTable -ForegroundColor $COLORS.Debug
-        
-        # Show active sessions count
-        $activeCount = ($sessions | Where-Object { $_.State -eq "Active" }).Count
-        Write-Host "Total: $($sessions.Count) sessions ($activeCount active)" -ForegroundColor $COLORS.Info
     }
-    
-    if ($SessionId -lt 0) {
-        # If only listing sessions, exit here
-        exit $ERROR_CODES.Success
-    }
+
+    $activeCount = ($rdpSessionList | Where-Object {$_.State -eq "Active"}).Count
+    Write-Host "Total: $($rdpSessionList.Count) sessions ($activeCount active)" -ForegroundColor $COLORS.Info
+
+    # Exit here if only listing sessions
+    exit $ERROR_CODES.Success
 }
 
-# Step 8: Handle session management operations
+# Step 8: Handle session management operations (disconnect/logoff/message)
 if ($Disconnect -or $Logoff) {
     if ($SessionId -lt 0) {
         Write-Host "Session ID is required for disconnect/logoff operations." -ForegroundColor $COLORS.Error
         exit $ERROR_CODES.InvalidParameter
     }
-    
-    $result = Disconnect-Session -SessionId $SessionId -Logoff $Logoff
-    
-    if ($result) {
-        exit $ERROR_CODES.Success
-    } else {
-        exit $ERROR_CODES.ConnectionFailed
-    }
+    $result = Disconnect-Session -SessionId $SessionId -Logoff:$Logoff
+    if ($result) { exit $ERROR_CODES.Success } else { exit $ERROR_CODES.ConnectionFailed }
 }
 
 if ($Message) {
@@ -5009,63 +5198,16 @@ if ($Message) {
         Write-Host "Session ID is required for sending messages." -ForegroundColor $COLORS.Error
         exit $ERROR_CODES.InvalidParameter
     }
-    
     $result = Send-SessionMessage -SessionId $SessionId -Message $Message
-    
-    if ($result) {
-        exit $ERROR_CODES.Success
-    } else {
-        exit $ERROR_CODES.ConnectionFailed
-    }
+    if ($result) { exit $ERROR_CODES.Success } else { exit $ERROR_CODES.ConnectionFailed }
 }
 
 # Step 9: Handle session connection
 if ($SessionId -ge 0) {
     Write-DebugLog "Processing connection request to session $SessionId" "INFO"
-    
-    # If no session specified but sessions were listed, prompt for selection
-    if ($SessionId -lt 0 -and -not $Quiet) {
-        $sessions = Get-RDPSessions
-        $activeSessions = $sessions | Where-Object { $_.State -eq "Active" -or $_.State -eq "Connected" }
-        
-        if ($activeSessions.Count -eq 0) {
-            Write-Host "No active sessions available for connection." -ForegroundColor $COLORS.Warning
-            exit $ERROR_CODES.SessionNotFound
-        }
-        
-        Write-Host "`nSelect a session to connect to:" -ForegroundColor $COLORS.Info
-        
-        $index = 1
-        foreach ($session in $activeSessions) {
-            Write-Host "  [$index] ID $($session.SessionId): $($session.UserName) [$($session.State)]" -ForegroundColor $COLORS.Debug
-            $index++
-        }
-        
-        Write-Host "  [0] Cancel" -ForegroundColor $COLORS.Debug
-        
-        try {
-            $choice = Read-Host "`nEnter selection"
-            $choiceIndex = [int]$choice - 1
-            
-            if ($choice -eq 0) {
-                exit $ERROR_CODES.Success
-            }
-            
-            if ($choiceIndex -ge 0 -and $choiceIndex -lt $activeSessions.Count) {
-                $SessionId = $activeSessions[$choiceIndex].SessionId
-            } else {
-                Write-Host "Invalid selection." -ForegroundColor $COLORS.Error
-                exit $ERROR_CODES.InvalidParameter
-            }
-        } catch {
-            Write-Host "Invalid input." -ForegroundColor $COLORS.Error
-            exit $ERROR_CODES.InvalidParameter
-        }
-    }
-    
-    # Connect to selected session
+
     $result = Connect-RDPSession -SessionId $SessionId -ViewOnly $ViewOnly
-    
+
     if ($result) {
         Write-DebugLog "Session connection completed successfully" "SUCCESS"
         exit $ERROR_CODES.Success
