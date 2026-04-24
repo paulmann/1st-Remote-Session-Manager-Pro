@@ -19,7 +19,7 @@
     Email:   mid1977@gmail.com
 
 .VERSION
-    3.0.1  (see in-script version history for detailed changelog)
+    1.2.0  (see in-script version history for detailed changelog)
 
 .REQUIREMENTS
     - Windows 7/8.1/10/11 or Windows Server with RDP enabled
