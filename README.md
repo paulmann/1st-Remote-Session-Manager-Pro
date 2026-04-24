@@ -2,7 +2,7 @@
 
 [![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/paulmann/1st-Remote-Session-Manager-Pro)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![PowerShell](https://img.shields.io/badge/powershell-5.1%2B-blue.svg)](https://docs.microsoft.com/en-us/powershell/)
+[![PowerShell](https://img.shields.io/badge/powershell-7%2B-blue.svg)](https://docs.microsoft.com/en-us/powershell/)
 [![Platform](https://img.shields.io/badge/platform-Windows%207+-blue.svg)](https://www.microsoft.com/windows/)
 [![RDP Management](https://img.shields.io/badge/feature-RDP%20Session%20Control-blue.svg)](https://docs.microsoft.com/en-us/windows-server/remote/remote-desktop-services/rds-rdsh)
 
@@ -272,7 +272,7 @@ The security implementation ensures proper authentication and authorization:
 | Component | Minimum Requirement | Recommended |
 |-----------|---------------------|-------------|
 | **Operating System** | Windows 7 SP1 / Server 2008 R2 | Windows 10/11 / Server 2016+ |
-| **PowerShell** | Version 5.1 | Version 7.2+ |
+| **PowerShell** | Version 7+ | Version 7.2+ |
 | **Memory** | 512 MB RAM | 2 GB RAM |
 | **Disk Space** | 10 MB free space | 100 MB free space |
 | **Permissions** | Local Administrator | Domain Administrator |
