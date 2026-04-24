@@ -9,7 +9,7 @@
 .NOTES
     Author: Mikhail Deynekin (mid1977@gmail.com)
     GitHub: https://github.com/paulmann/1st-Remote-Session-Manager-Pro
-    Version: 1.1.0
+    Version: 1.1.1
     Last Modified: 2025-01-15
     
 .LICENSE
@@ -103,7 +103,7 @@ param(
 
 # Script metadata
 $SCRIPT_NAME = "1st-Remote-Session-Manager-Pro"
-$SCRIPT_VERSION = "1.1.0"
+$SCRIPT_VERSION = "1.1.1"
 $SCRIPT_AUTHOR = "Mikhail Deynekin"
 $GITHUB_REPO = "https://raw.githubusercontent.com/paulmann/1st-Remote-Session-Manager-Pro"
 $RAW_GITHUB_URL = "https://raw.githubusercontent.com/paulmann/1st-Remote-Session-Manager-Pro/refs/heads/main/1st-Remote-Session-Manager-Pro.ps1"
@@ -1014,109 +1014,96 @@ function Format-StatisticsLines {
 function Show-SessionsPS7 {
     <#
     .SYNOPSIS
-        Displays a full professional RDP session report for -Sessions mode.
+        Displays a professional session report for -Sessions mode.
 
     .DESCRIPTION
-        Enhanced PowerShell 7+ report function for 1st-Remote-Session-Manager-Pro.ps1.
-        Produces a complete report similar to qwinsta_IP_PS7.ps1 while remaining
-        compatible with ENG ANSI consoles by automatically switching to ASCII headers.
+        Uses the same presentation style as the -Status mode and fixes
+        incomplete RDP session detection from qwinsta output on localized
+        Windows systems.
 
     .PARAMETER HoursBack
-        Number of hours of event history to analyze. Default: 24.
+        Event log analysis depth in hours.
 
     .PARAMETER ComputerName
-        Target computer name. Default: local machine.
+        Target computer name.
 
     .PARAMETER Quiet
-        Suppresses the initial completion summary box.
+        Suppress summary header.
 
-    .PARAMETER IncludeAllSessions
-        Shows all parsed sessions, including console/services/listener rows.
-        By default, the report focuses on real RDP user sessions only.
-
-    .PARAMETER ForceAscii
-        Forces ASCII headers instead of Unicode box-drawing characters.
-
-    .EXAMPLE
-        Show-SessionsPS7
-
-    .EXAMPLE
-        Show-SessionsPS7 -HoursBack 48
-
-    .EXAMPLE
-        Show-SessionsPS7 -IncludeAllSessions -ForceAscii
+    .PARAMETER IncludeSystemSessions
+        Include console, services, and listener sessions in output.
     #>
     [CmdletBinding()]
     param(
-        [int]    $HoursBack          = 24,
-        [string] $ComputerName       = $env:COMPUTERNAME,
+        [int]    $HoursBack = 24,
+        [string] $ComputerName = $env:COMPUTERNAME,
         [switch] $Quiet,
-        [switch] $IncludeAllSessions,
-        [switch] $ForceAscii
+        [switch] $IncludeSystemSessions
     )
 
     $analysisStart = Get-Date
 
-    # -----------------------------------------------------------------------
-    # 1. Collect sessions
-    # -----------------------------------------------------------------------
-    $sessions = @()
-    if (Get-Command -Name Get-RDPSessions -ErrorAction SilentlyContinue) {
-        try {
-            $sessions = Get-SafeArray (Get-RDPSessions -ComputerName $ComputerName)
-        }
-        catch {
-            $sessions = @()
-        }
+    # ----------------------------------------------------------------------
+    # Collect sessions
+    # ----------------------------------------------------------------------
+    $allSessions = @()
+
+    if (Get-Command -Name Get-RDPSessionsPS7-Fixed -ErrorAction SilentlyContinue) {
+        $allSessions = @(Get-RDPSessionsPS7-Fixed -ComputerName $ComputerName)
+    }
+    elseif (Get-Command -Name Get-RDPSessions -ErrorAction SilentlyContinue) {
+        $allSessions = @(Get-RDPSessions -ComputerName $ComputerName)
     }
 
-    # -----------------------------------------------------------------------
-    # 2. Collect connections
-    # -----------------------------------------------------------------------
+    if (-not $allSessions) {
+        $allSessions = @()
+    }
+
+    # ----------------------------------------------------------------------
+    # Collect connections
+    # ----------------------------------------------------------------------
     $connections = @()
     if (Get-Command -Name Get-AllRdpConnections -ErrorAction SilentlyContinue) {
         try {
-            $connections = Get-SafeArray (Get-AllRdpConnections -HoursBack $HoursBack -ComputerName $ComputerName)
+            $connections = @(Get-AllRdpConnections -HoursBack $HoursBack -ComputerName $ComputerName)
         }
         catch {
             $connections = @()
         }
     }
 
-    # -----------------------------------------------------------------------
-    # 3. Match sessions with IP addresses
-    # -----------------------------------------------------------------------
+    # ----------------------------------------------------------------------
+    # Match sessions with IPs
+    # ----------------------------------------------------------------------
     $matches = @()
-    if (Get-Command -Name Match-SessionsWithIPs -ErrorAction SilentlyContinue) {
+    if ($allSessions.Count -gt 0 -and $connections.Count -gt 0 -and (Get-Command -Name Match-SessionsWithIPs -ErrorAction SilentlyContinue)) {
         try {
-            $matches = Get-SafeArray (
-                Match-SessionsWithIPs -Sessions $sessions -Connections $connections -TimeWindowHours $HoursBack
-            )
+            $matches = @(Match-SessionsWithIPs -Sessions $allSessions -Connections $connections -TimeWindowHours $HoursBack)
         }
         catch {
             $matches = @()
         }
     }
 
-    $analysisTime = Get-Date
+    $analysisEnd = Get-Date
 
-    # -----------------------------------------------------------------------
-    # 4. Filter current session list for display
-    # -----------------------------------------------------------------------
-    $displaySessions = if ($IncludeAllSessions) {
-        @($sessions)
+    # ----------------------------------------------------------------------
+    # Session filtering for display
+    # ----------------------------------------------------------------------
+    $displaySessions = if ($IncludeSystemSessions) {
+        @($allSessions)
     }
     else {
-        @($sessions | Where-Object { Test-RdpDisplaySession -Session $_ })
+        @(
+            $allSessions | Where-Object {
+                $_.SessionId -ne 0 -and
+                $_.SessionId -ne 65536 -and
+                $_.UserName -notin 'services', 'rdp-tcp', 'SYSTEM', '', $null
+            }
+        )
     }
 
-    # -----------------------------------------------------------------------
-    # 5. Statistics
-    # -----------------------------------------------------------------------
-    $matchedSessions = @($matches | Where-Object { $_.Confidence -and $_.Confidence -ne 'None' })
-    $activeSessions  = @($displaySessions | Where-Object { (Get-SessionStateName -Session $_) -eq 'Active' })
-    $rdpSessions     = @($displaySessions | Where-Object { (Get-SessionTypeName -Session $_) -eq 'RDP' })
-    $consoleSessions = @($displaySessions | Where-Object { (Get-SessionTypeName -Session $_) -eq 'Console' })
+    $matchedRows = @($matches | Where-Object { $_.Confidence -and $_.Confidence -ne 'None' })
 
     $uniqueIPs = @(
         $connections |
@@ -1143,75 +1130,65 @@ function Show-SessionsPS7 {
     $stats = [ordered]@{
         'Total Sessions'    = $displaySessions.Count
         'Total Connections' = $connections.Count
-        'Matched Sessions'  = $matchedSessions.Count
-        'Active Sessions'   = $activeSessions.Count
-        'RDP Sessions'      = $rdpSessions.Count
-        'Console Sessions'  = $consoleSessions.Count
+        'Matched Sessions'  = $matchedRows.Count
+        'Active Sessions'   = @($displaySessions | Where-Object { $_.State -eq 'Active' }).Count
+        'RDP Sessions'      = @($displaySessions | Where-Object { $_.Type -eq 'RDP' }).Count
+        'Console Sessions'  = @($displaySessions | Where-Object { $_.Type -eq 'Console' }).Count
         'Unique IPs'        = $uniqueIPs.Count
         'Internal IPs'      = $internalIPs.Count
         'External IPs'      = $externalIPs.Count
     }
 
-    # -----------------------------------------------------------------------
-    # 6. Completion summary
-    # -----------------------------------------------------------------------
+    # ----------------------------------------------------------------------
+    # Summary block in -Status style
+    # ----------------------------------------------------------------------
     if (-not $Quiet) {
         Write-Host ''
-        Write-BoxHeader -Title 'RDP ANALYSIS COMPLETED' `
-                        -Color $script:COLORS.Success `
-                        -ForceAscii:$ForceAscii
-
-        Write-Host 'Summary:' -ForegroundColor $script:COLORS.Info
-        Write-Host ('  * Sessions found:     {0}' -f $displaySessions.Count)    -ForegroundColor $script:COLORS.Debug
-        Write-Host ('  * Connections found:  {0}' -f $connections.Count)        -ForegroundColor $script:COLORS.Debug
-        Write-Host ('  * IP matches:         {0}' -f $matchedSessions.Count)    -ForegroundColor $script:COLORS.Debug
-        Write-Host ('  * Analysis time:      {0}' -f $analysisStart.ToString('HH:mm:ss')) -ForegroundColor $script:COLORS.Debug
-        Write-Host ''
+        Write-Host 'RDP SESSION ANALYSIS' -ForegroundColor $script:COLORS.Header
+        Write-Host '--------------------' -ForegroundColor $script:COLORS.Muted
+        Write-Host ('Computer Name : {0}' -f $ComputerName) -ForegroundColor $script:COLORS.Debug
+        Write-Host ('Analysis Time : {0}' -f $analysisStart.ToString('HH:mm:ss dd.MM.yyyy')) -ForegroundColor $script:COLORS.Debug
+        Write-Host ('Sessions Found: {0}' -f $displaySessions.Count) -ForegroundColor $script:COLORS.Debug
+        Write-Host ('Connections   : {0}' -f $connections.Count) -ForegroundColor $script:COLORS.Debug
+        Write-Host ('IP Matches    : {0}' -f $matchedRows.Count) -ForegroundColor $script:COLORS.Debug
     }
 
-    # -----------------------------------------------------------------------
-    # 7. Main report header
-    # -----------------------------------------------------------------------
-    Write-BoxHeader -Title 'RDP SESSION ANALYSIS REPORT' `
-                    -SubTitle ($analysisTime.ToString('HH:mm:ss dd.MM.yyyy')) `
-                    -Color $script:COLORS.Header `
-                    -ForceAscii:$ForceAscii
+    # ----------------------------------------------------------------------
+    # Statistics
+    # ----------------------------------------------------------------------
+    Write-Host ''
+    Write-Host 'STATISTICS:' -ForegroundColor $script:COLORS.Header
+    Write-Host '===========' -ForegroundColor $script:COLORS.Muted
 
-    # -----------------------------------------------------------------------
-    # 8. Statistics section
-    # -----------------------------------------------------------------------
-    Write-SectionHeader -Title 'STATISTICS:'
-
-    foreach ($line in (Format-StatisticsLines -Statistics $stats)) {
-        Write-Host $line -ForegroundColor $script:COLORS.Debug
+    foreach ($entry in $stats.GetEnumerator()) {
+        Write-Host ('{0,-18}: {1}' -f $entry.Key, $entry.Value) -ForegroundColor $script:COLORS.Debug
     }
 
-    # -----------------------------------------------------------------------
-    # 9. Current RDP sessions
-    # -----------------------------------------------------------------------
-    Write-SectionHeader -Title 'CURRENT RDP SESSIONS:'
+    # ----------------------------------------------------------------------
+    # Current RDP sessions
+    # ----------------------------------------------------------------------
+    Write-Host ''
+    Write-Host 'CURRENT RDP SESSIONS:' -ForegroundColor $script:COLORS.Header
+    Write-Host '=====================' -ForegroundColor $script:COLORS.Muted
 
     if ($displaySessions.Count -eq 0) {
-        Write-Host 'No active RDP sessions found.' -ForegroundColor $script:COLORS.Warning
+        Write-Host 'No RDP sessions found.' -ForegroundColor $script:COLORS.Warning
     }
     else {
-        $sessionRows = $displaySessions | Sort-Object SessionId | ForEach-Object {
-            $ipDisplay = 'N/A'
-            if ($_.PSObject.Properties['IPAddress'] -and -not [string]::IsNullOrWhiteSpace([string]$_.IPAddress)) {
-                $ipDisplay = Format-IPForDisplay -IP ([string]$_.IPAddress)
+        $sessionRows = $displaySessions |
+            Sort-Object SessionId |
+            ForEach-Object {
+                [PSCustomObject]@{
+                    Session  = if ($_.SessionName) { $_.SessionName } else { 'N/A' }
+                    Username = $_.UserName
+                    ID       = $_.SessionId
+                    State    = $_.State
+                    Type     = $_.Type
+                    Current  = if ($_.IsCurrent) { '>' } else { '' }
+                    IP       = if ($_.IPAddress) { Format-IPForDisplay $_.IPAddress } else { 'N/A' }
+                    Source   = $_.Source
+                }
             }
-
-            [PSCustomObject]@{
-                Session  = [string]$_.SessionName
-                Username = [string]$_.UserName
-                ID       = [int]$_.SessionId
-                State    = (Get-SessionStateName -Session $_)
-                Type     = (Get-SessionTypeName -Session $_)
-                Current  = if ($_.PSObject.Properties['IsCurrent'] -and [bool]$_.IsCurrent) { '>' } else { '' }
-                IP       = $ipDisplay
-                Source   = if ($_.PSObject.Properties['Source']) { [string]$_.Source } else { 'N/A' }
-            }
-        }
 
         $sessionRows |
             Format-Table -AutoSize `
@@ -1227,104 +1204,64 @@ function Show-SessionsPS7 {
             ForEach-Object { Write-Host $_ -ForegroundColor $script:COLORS.Info -NoNewline }
     }
 
-    # -----------------------------------------------------------------------
-    # 10. Matched sessions with IP addresses
-    # -----------------------------------------------------------------------
-    $displayMatches = @(
-        $matches |
-        Where-Object { $_.Confidence -and $_.Confidence -ne 'None' }
-    )
+    # ----------------------------------------------------------------------
+    # Matched sessions
+    # ----------------------------------------------------------------------
+    if ($matchedRows.Count -gt 0) {
+        Write-Host ''
+        Write-Host 'MATCHED SESSIONS WITH IP ADDRESSES:' -ForegroundColor $script:COLORS.Header
+        Write-Host '==================================' -ForegroundColor $script:COLORS.Muted
 
-    if ($displayMatches.Count -gt 0) {
-        Write-SectionHeader -Title 'MATCHED SESSIONS WITH IP ADDRESSES:'
-
-        $matchRows = $displayMatches | Sort-Object SessionId | ForEach-Object {
-            $matchedIP = if ($_.MatchedIP) {
-                Format-IPForDisplay -IP ([string]$_.MatchedIP)
+        $matchTable = $matchedRows |
+            Sort-Object SessionId |
+            ForEach-Object {
+                [PSCustomObject]@{
+                    Session      = $_.SessionName
+                    Username     = $_.Username
+                    ID           = $_.SessionId
+                    SessionState = $_.SessionState
+                    Type         = $_.SessionType
+                    MatchedIP    = if ($_.MatchedIP) { Format-IPForDisplay $_.MatchedIP } else { 'N/A' }
+                    TimeDiff     = if ($_.TimeDifference) { '{0} min' -f $_.TimeDifference } else { 'N/A' }
+                    Confidence   = $_.Confidence
+                    Source       = $_.MatchedSource
+                }
             }
-            else {
-                'N/A'
-            }
 
-            $timeDiff = 'N/A'
-            if ($null -ne $_.TimeDifference -and "$($_.TimeDifference)" -ne '') {
-                $timeDiff = '{0} min' -f $_.TimeDifference
-            }
-
-            [PSCustomObject]@{
-                Session      = [string]$_.SessionName
-                Username     = [string]$_.Username
-                ID           = [int]$_.SessionId
-                SessionState = [string]$_.SessionState
-                Type         = [string]$_.SessionType
-                MatchedIP    = $matchedIP
-                TimeDiff     = $timeDiff
-                Confidence   = [string]$_.Confidence
-                Source       = [string]$_.MatchedSource
-            }
-        }
-
-        $matchRows |
+        $matchTable |
             Format-Table -AutoSize `
-                @{ Label = 'Session';      Expression = { $_.Session      } },
-                @{ Label = 'Username';     Expression = { $_.Username     } },
-                @{ Label = 'ID';           Expression = { $_.ID           }; Alignment = 'Right' },
-                @{ Label = 'SessionState'; Expression = { $_.SessionState } },
-                @{ Label = 'Type';         Expression = { $_.Type         } },
-                @{ Label = 'MatchedIP';    Expression = { $_.MatchedIP    } },
-                @{ Label = 'TimeDiff';     Expression = { $_.TimeDiff     } },
-                @{ Label = 'Confidence';   Expression = { $_.Confidence   } },
-                @{ Label = 'Source';       Expression = { $_.Source       } } |
+                Session, Username, ID, SessionState, Type, MatchedIP, TimeDiff, Confidence, Source |
             Out-String |
             ForEach-Object { Write-Host $_ -ForegroundColor $script:COLORS.Info -NoNewline }
     }
 
-    # -----------------------------------------------------------------------
-    # 11. Recent RDP connections
-    # -----------------------------------------------------------------------
+    # ----------------------------------------------------------------------
+    # Recent connections
+    # ----------------------------------------------------------------------
     if ($connections.Count -gt 0) {
-        Write-SectionHeader -Title ("RECENT RDP CONNECTIONS (Last {0} hours):" -f $HoursBack)
+        Write-Host ''
+        Write-Host ("RECENT RDP CONNECTIONS (Last {0} hours):" -f $HoursBack) -ForegroundColor $script:COLORS.Header
+        Write-Host '==========================================' -ForegroundColor $script:COLORS.Muted
 
-        $connRows = $connections |
+        $connectionRows = $connections |
             Sort-Object Time -Descending |
             Select-Object -First 10 |
             ForEach-Object {
-                $ipDisplay = if ($_.IP) {
-                    Format-IPForDisplay -IP ([string]$_.IP)
-                }
-                else {
-                    'N/A'
-                }
-
-                $sessionId = 'N/A'
-                if ($_.PSObject.Properties['QwinstaSessionID'] -and
-                    -not [string]::IsNullOrWhiteSpace([string]$_.QwinstaSessionID) -and
-                    [string]$_.QwinstaSessionID -notin 'NA', 'N/A') {
-                    $sessionId = [string]$_.QwinstaSessionID
-                }
-
                 [PSCustomObject]@{
-                    Time      = if ($_.Time) { ([datetime]$_.Time).ToString('HH:mm:ss dd.MM') } else { 'N/A' }
-                    User      = if ($_.User) { [string]$_.User } else { 'Unknown' }
-                    IP        = $ipDisplay
-                    Type      = if ($_.Type) { [string]$_.Type } else { 'Unknown' }
-                    EventID   = if ($_.EventID) { [int]$_.EventID } else { 0 }
-                    SessionID = $sessionId
-                    Source    = if ($_.Source) { [string]$_.Source } else { 'Unknown' }
-                    Active    = if ($_.PSObject.Properties['IsActive'] -and [bool]$_.IsActive) { 'Yes' } else { 'No' }
+                    Time      = if ($_.Time) { $_.Time.ToString('HH:mm:ss dd.MM') } else { 'N/A' }
+                    User      = $_.User
+                    IP        = if ($_.IP) { Format-IPForDisplay $_.IP } else { 'N/A' }
+                    Type      = $_.Type
+                    EventID   = $_.EventID
+                    SessionID = if ($_.QwinstaSessionID -and $_.QwinstaSessionID -ne 'NA') { $_.QwinstaSessionID } else { 'N/A' }
+                    Source    = $_.Source
+                    Active    = if ($_.IsActive) { 'Yes' } else { 'No' }
                 }
             }
 
-        $connRows |
+        $connectionRows |
             Format-Table -AutoSize `
-                @{ Label = 'Time';      Expression = { $_.Time      } },
-                @{ Label = 'User';      Expression = { $_.User      } },
-                @{ Label = 'IP';        Expression = { $_.IP        } },
-                @{ Label = 'Type';      Expression = { $_.Type      } },
-                @{ Label = 'EventID';   Expression = { $_.EventID   }; Alignment = 'Right' },
-                @{ Label = 'SessionID'; Expression = { $_.SessionID } },
-                @{ Label = 'Source';    Expression = { $_.Source    } },
-                @{ Label = 'Active';    Expression = { $_.Active    } } |
+                Time, User, IP, Type, EventID, SessionID, Source, Active |
             Out-String |
             ForEach-Object { Write-Host $_ -ForegroundColor $script:COLORS.Debug -NoNewline }
     }
@@ -1332,68 +1269,232 @@ function Show-SessionsPS7 {
     Write-Host ''
 }
 
+
+
 #region PowerShell 7+ Implementation with Modern Features
-function Get-RDPSessionsPS7 {
-    <#
-    .SYNOPSIS
-        PowerShell 7+ optimized session enumeration with Russian support
-    #>
-    
+
+function Parse-QwinstaLine-Loose {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
     param(
-        [string]$ComputerName = $env:COMPUTERNAME,
-        [switch]$ExtendedInfo
+        [Parameter(Mandatory)]
+        [string] $Line
     )
-    
-    $sessions = @()
-    
+
     try {
-        # Use qwinsta with proper Russian encoding
-        $qwinstaOutput = Get-QwinstaOutputPS7 -ComputerName $ComputerName
-        if ($qwinstaOutput) {
-            $sessions += Parse-QwinstaOutputPS7 -Output $qwinstaOutput
+        if ([string]::IsNullOrWhiteSpace($Line)) {
+            return $null
         }
-        
-        # Method 2: Parallel execution for query session (if needed)
-        if ($sessions.Count -eq 0) {
-            $sessions += Get-QuerySessionParallel -ComputerName $ComputerName
+
+        $originalLine = $Line
+        $isCurrent = $false
+
+        if ($Line.StartsWith('>')) {
+            $isCurrent = $true
+            $Line = $Line.Substring(1)
         }
-        
-        # Clean and normalize
-        $normalizedSessions = @()
-        foreach ($session in $sessions) {
-            # Ensure user name is not empty
-            if ([string]::IsNullOrWhiteSpace($session.UserName) -or $session.UserName -eq "0") { 
-                $session.UserName = "SYSTEM" 
+
+        $trimmed = $Line.TrimEnd()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) {
+            return $null
+        }
+
+        # Skip header and separator-like lines
+        if ($trimmed -match 'SESSIONNAME|USERNAME|ID|STATE|TYPE|DEVICE|СЕАНС|ПОЛЬЗОВАТЕЛЬ|СОСТОЯНИЕ|УСТРОЙСТВО') {
+            return $null
+        }
+
+        # Normalize spaces for easier parsing
+        $compact = ($trimmed -replace '\s{2,}', '|').Trim('|')
+        $parts = @($compact -split '\|' | ForEach-Object { $_.Trim() })
+
+        if ($parts.Count -lt 2) {
+            return $null
+        }
+
+        # Find SessionId position
+        $idIndex = -1
+        for ($i = 0; $i -lt $parts.Count; $i++) {
+            if ($parts[$i] -match '^\d+$') {
+                $idIndex = $i
+                break
             }
-            
-            # Final state normalization
-            if ($session.State -match "╨Р╨║╤В╨╕╨▓╨╜╨╛|Active|Conn|Connected") {
-                $session.State = "Active"
-            } elseif ($session.State -match "╨Ф╨╕╤Б╨║|Disc|Disconnected") {
-                $session.State = "Disconnected"
-            } elseif ($session.State -match "╨Я╤А╨╕╨╡╨╝|Listen") {
-                $session.State = "Listen"
+        }
+
+        if ($idIndex -lt 0) {
+            return $null
+        }
+
+        $sessionId = [int]$parts[$idIndex]
+
+        $sessionName = ''
+        $userName    = ''
+        $stateRaw    = ''
+        $typeRaw     = ''
+        $deviceRaw   = ''
+
+        switch ($idIndex) {
+            0 {
+                # Rare/broken case: only ID first
+                $sessionName = ''
+                $userName    = 'SYSTEM'
             }
-            
-            $normalizedSessions += $session
+            1 {
+                # Usually: "console | 1 | Active"
+                # or      : "ilab_en | 2 | Disc"
+                $sessionName = ''
+                $userName    = $parts[0]
+            }
+            default {
+                # Usually: "rdp-tcp#1 | md | 20 | Active"
+                $sessionName = $parts[0]
+                $userName    = $parts[1]
+            }
         }
-        
-        $sessions = $normalizedSessions
-        
-        # Extended information with compatibility
-        if ($ExtendedInfo) {
-            $sessions = Add-ExtendedInfoParallel -Sessions $sessions -ComputerName $ComputerName
+
+        if ($idIndex + 1 -lt $parts.Count) { $stateRaw  = $parts[$idIndex + 1] }
+        if ($idIndex + 2 -lt $parts.Count) { $typeRaw   = $parts[$idIndex + 2] }
+        if ($idIndex + 3 -lt $parts.Count) { $deviceRaw = $parts[$idIndex + 3] }
+
+        # Normalize special rows
+        if ($userName -eq 'services' -or $userName -eq 'console' -or $userName -eq 'rdp-tcp') {
+            $sessionName = $userName
+            $userName = 'SYSTEM'
         }
-        
-        Write-DebugLog "PS7+: Found $($sessions.Count) sessions" "SUCCESS" @{
-            Method = if ($qwinstaOutput) { "qwinsta" } else { "fallback" }
+
+        # Detect session type more reliably
+        $type = 'Unknown'
+        if ($sessionName -match '^rdp-tcp#\d+$') {
+            $type = 'RDP'
         }
-        
-    } catch {
-        Write-DebugLog "Error in Get-RDPSessionsPS7: $_" "ERROR"
+        elseif ($sessionName -eq 'rdp-tcp') {
+            $type = 'Listener'
+        }
+        elseif ($sessionName -eq 'console') {
+            $type = 'Console'
+        }
+        elseif ($sessionName -eq 'services') {
+            $type = 'Services'
+        }
+        elseif ([string]::IsNullOrWhiteSpace($sessionName) -and
+                $userName -notin 'SYSTEM', '', $null -and
+                $sessionId -gt 1 -and
+                $sessionId -ne 65536) {
+            # User session without visible session name: treat as user RDP-like session
+            $type = 'RDP'
+        }
+
+        # Normalize state without relying on broken OEM text
+        $state = 'Unknown'
+        if ($isCurrent) {
+            $state = 'Active'
+        }
+        elseif ($sessionName -match '^rdp-tcp#\d+$') {
+            $state = 'Active'
+        }
+        elseif ($sessionName -eq 'console' -and $sessionId -eq 1) {
+            $state = 'Active'
+        }
+        elseif ($sessionName -eq 'rdp-tcp' -and $sessionId -eq 65536) {
+            $state = 'Listen'
+        }
+        elseif ($sessionId -gt 1 -and $userName -notin 'SYSTEM', '', $null) {
+            $state = 'Disconnected'
+        }
+
+        [PSCustomObject]@{
+            SessionName = $sessionName
+            UserName    = $userName
+            SessionId   = $sessionId
+            State       = $state
+            Type        = $type
+            Device      = if ($deviceRaw) { $deviceRaw } else { '' }
+            IsCurrent   = $isCurrent
+            Source      = 'qwinsta_ps7'
+            RawState    = $stateRaw
+            RawType     = $typeRaw
+            RawLine     = $originalLine
+        }
     }
-    
-    return $sessions
+    catch {
+        return $null
+    }
+}
+
+function Get-RDPSessionsPS7 {
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param(
+        [string] $ComputerName = $env:COMPUTERNAME,
+        [switch] $ExtendedInfo
+    )
+
+    $sessions = [System.Collections.Generic.List[object]]::new()
+
+    try {
+        if ($ComputerName -eq $env:COMPUTERNAME) {
+            $rawOutput = & qwinsta 2>$null
+        }
+        else {
+            $rawOutput = & qwinsta "/server:$ComputerName" 2>$null
+        }
+
+        if (-not $rawOutput) {
+            return @()
+        }
+
+        $lines = @($rawOutput -split "`r?`n")
+        foreach ($line in $lines) {
+            $session = Parse-QwinstaLine-Loose -Line $line
+            if ($null -ne $session) {
+                $sessions.Add($session)
+            }
+        }
+
+        if ($sessions.Count -eq 0) {
+            return @()
+        }
+
+        $normalized = foreach ($s in $sessions) {
+            $sessionName = [string]$s.SessionName
+            $userName    = [string]$s.UserName
+            $sessionId   = [int]$s.SessionId
+            $state       = [string]$s.State
+            $type        = [string]$s.Type
+
+            # Final normalization for problematic rows
+            if ($sessionName -eq 'console' -and $userName -eq 'SYSTEM') {
+                $userName = 'console'
+            }
+
+            if ($sessionName -eq 'services' -and $userName -eq 'SYSTEM') {
+                $userName = 'services'
+            }
+
+            if ($sessionName -eq 'rdp-tcp' -and $userName -eq 'SYSTEM') {
+                $userName = 'rdp-tcp'
+            }
+
+            [PSCustomObject]@{
+                SessionName = $sessionName
+                UserName    = $userName
+                SessionId   = $sessionId
+                State       = $state
+                Type        = $type
+                Device      = $s.Device
+                IsCurrent   = [bool]$s.IsCurrent
+                Source      = $s.Source
+                RawState    = $s.RawState
+                RawType     = $s.RawType
+                RawLine     = $s.RawLine
+            }
+        }
+
+        return @($normalized | Sort-Object SessionId)
+    }
+    catch {
+        return @()
+    }
 }
 
 function Get-QwinstaOutputPS7 {
