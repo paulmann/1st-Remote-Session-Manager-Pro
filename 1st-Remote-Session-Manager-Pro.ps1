@@ -1,19 +1,46 @@
-<#
+<# 
 .SYNOPSIS
-    Remote Session Manager Pro - Advanced RDP session control and management tool
-    
+    1st Remote Session Manager Pro – Advanced RDP session control and shadowing toolkit.
+
 .DESCRIPTION
-    Professional tool for managing, monitoring, and controlling RDP sessions on Windows systems.
-    Supports Windows 7/8/10/11 and Server editions with PowerShell 5.1+ compatibility.
-    
-.NOTES
-    Author: Mikhail Deynekin (mid1977@gmail.com)
+    Professional PowerShell-based tool for controlling, monitoring, and managing RDP sessions
+    on Windows client and server systems. Supports interactive session selection, shadowing
+    (view-only and full-control), disconnect/logoff operations, message sending, and
+    auto-elevation for administrative tasks. Designed to work reliably on Windows 7–11 and
+    Windows Server with PowerShell 5.1+ and PowerShell 7+.
+
+.PROJECT
+    1st Remote Session Manager Pro
     GitHub: https://github.com/paulmann/1st-Remote-Session-Manager-Pro
-    Version: 1.2.0
-    Last Modified: 2025-01-15
-    
+
+.AUTHOR
+    Mikhail Deynekin (paulmann)
+    Website: https://deynekin.com
+    Email:   mid1977@gmail.com
+
+.VERSION
+    3.0.1  (see in-script version history for detailed changelog)
+
+.REQUIREMENTS
+    - Windows 7/8.1/10/11 or Windows Server with RDP enabled
+    - PowerShell 7+
+    - Administrative privileges for shadowing, session control, and event log access
+    - ExecutionPolicy that allows running local scripts
+
+.FEATURES
+    - Enumerates local and remote RDP sessions with rich metadata
+    - Interactive session picker with keyboard-friendly UI
+    - Shadowing in view-only or full-control mode (with consent options)
+    - Quick actions: disconnect, log off, send message
+    - Optional auto-elevation and environment checks
+    - Integration with GitHub for update checks and version information
+
 .LICENSE
-    MIT License - Free for commercial and personal use with attribution.
+    See LICENSE file in the GitHub repository for licensing details.
+
+.NOTES
+    - Use at your own risk. Test in a lab environment before deploying in production.
+    - Run PowerShell as Administrator for full functionality.
 #>
 
 #Requires -RunAsAdministrator
