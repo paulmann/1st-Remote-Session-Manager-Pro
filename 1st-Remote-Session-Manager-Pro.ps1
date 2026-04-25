@@ -19,7 +19,7 @@
     Email:   mid1977@gmail.com
 
 .VERSION
-    1.3.1  (see in-script version history for detailed changelog)
+    1.5.0  (see in-script version history for detailed changelog)
 
 .REQUIREMENTS
     - Windows 7/8.1/10/11 or Windows Server with RDP enabled
@@ -141,6 +141,16 @@ param(
     [string]$ExportCsv
 )
 
+try {
+    $enCulture = [System.Globalization.CultureInfo]'en-US'
+    [System.Threading.Thread]::CurrentThread.CurrentUICulture = $enCulture
+    [System.Threading.Thread]::CurrentThread.CurrentCulture   = $enCulture
+} catch {
+}
+$env:LANG   = 'en-US'
+$env:LC_ALL = 'en-US'
+
+
 $script:DebugMode = [bool]$DebugMode.IsPresent
 $script:Force     = [bool]$Force.IsPresent
 $script:Quiet     = [bool]$Quiet.IsPresent
@@ -151,6 +161,30 @@ if ($script:DebugMode) {
     Write-Host ("[DEBUG-BOOT] DebugMode=True; SessionId={0}; ComputerName={1}; Args={2}" -f $SessionId, $ComputerName, ($args -join ' ')) -ForegroundColor Yellow
 }
 
+# ============================================================================
+# qwinsta-en.ps1 bootstrap — locale-independent session engine
+# Version: 1.1.0
+# NOTE: Write-DebugLog may not be defined yet at this point,
+#       so all debug calls are guarded with Get-Command check.
+# ============================================================================
+$script:QwinstaEnPath = Join-Path -Path $PSScriptRoot -ChildPath 'qwinsta-en.ps1'
+
+if (Test-Path -LiteralPath $script:QwinstaEnPath) {
+    . $script:QwinstaEnPath
+}
+else {
+    Write-Warning "qwinsta-en.ps1 not found at $script:QwinstaEnPath — session detection will use legacy fallback"
+}
+
+$AnalyzerScriptPath = Join-Path $PSScriptRoot 'qwinsta_IP_PS7.ps1'
+
+if (Test-Path $AnalyzerScriptPath) {
+    . $AnalyzerScriptPath
+} else {
+    Write-Warning "Advanced RDP Analyzer script not found: $AnalyzerScriptPath. Sessions mode will use basic qwinsta parser."
+}
+
+
 #region CONSTANTS AND CONFIGURATION
 # ============================================================================
 # GLOBAL CONSTANTS AND CONFIGURATION
@@ -158,7 +192,7 @@ if ($script:DebugMode) {
 
 # Script metadata
 $SCRIPT_NAME = "1st-Remote-Session-Manager-Pro"
-$SCRIPT_VERSION = "1.3.1"
+$SCRIPT_VERSION = "1.5.0"
 $SCRIPT_AUTHOR = "Mikhail Deynekin"
 $GITHUB_REPO = "https://raw.githubusercontent.com/paulmann/1st-Remote-Session-Manager-Pro"
 $RAW_GITHUB_URL = "https://raw.githubusercontent.com/paulmann/1st-Remote-Session-Manager-Pro/refs/heads/main/1st-Remote-Session-Manager-Pro.ps1"
@@ -239,23 +273,6 @@ $SUPPORTED_WINDOWS_VERSIONS = @(
     "6.3",  # Windows 8.1 / Server 2012 R2
     "10.0"  # Windows 10/11 / Server 2016+
 )
-
-$AnalyzerScriptPath = Join-Path $PSScriptRoot 'qwinsta_IP_PS7.ps1'
-
-if (Test-Path $AnalyzerScriptPath) {
-    . $AnalyzerScriptPath 
-} else {
-    Write-Warning "Advanced RDP Analyzer script not found: $AnalyzerScriptPath. Sessions mode will use basic qwinsta parser."
-}
-
-try {
-    $enCulture = [System.Globalization.CultureInfo]'en-US'
-    [System.Threading.Thread]::CurrentThread.CurrentUICulture = $enCulture
-    [System.Threading.Thread]::CurrentThread.CurrentCulture   = $enCulture
-} catch {
-}
-$env:LANG   = 'en-US'
-$env:LC_ALL = 'en-US'
 
 
 #endregion
@@ -428,6 +445,25 @@ function Get-SafeArray {
     return @($InputObject)
 }
 
+function Write-SessionParseDebug {
+    [CmdletBinding()]
+    param(
+        [string]$Stage,
+        [string]$Message,
+        [hashtable]$Data
+    )
+
+    if (-not $script:DebugMode -and -not $global:DebugMode -and -not $DebugMode) {
+        return
+    }
+
+    if ($Data) {
+        Write-DebugLog "[SessionParse][$Stage] $Message" DEBUG $Data
+    }
+    else {
+        Write-DebugLog "[SessionParse][$Stage] $Message" DEBUG
+    }
+}
 
 function Write-DebugLog {
     [CmdletBinding()]
@@ -564,6 +600,177 @@ function Get-WindowsVersion {
     return $null
 }
 
+
+function Parse-TerminalSessionLine {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Line
+    )
+
+    Write-SessionParseDebug -Stage 'ParseLine' -Message 'Incoming line' -Data @{
+        RawLine = $Line
+        Length  = if ($null -ne $Line) { $Line.Length } else { 0 }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Line)) {
+        Write-SessionParseDebug -Stage 'ParseLine' -Message 'Skipped empty/whitespace line'
+        return $null
+    }
+
+    $raw = $Line
+    $isCurrent = $false
+
+    if ($raw.StartsWith('>')) {
+        $isCurrent = $true
+        $raw = $raw.Substring(1)
+    }
+
+    $raw = $raw.TrimEnd()
+
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        Write-SessionParseDebug -Stage 'ParseLine' -Message 'Skipped after TrimEnd because line became empty'
+        return $null
+    }
+
+    if ($raw -match '^\s*СЕАНС\s+ПОЛЬЗОВАТЕЛЬ\s+ИД\s+СОСТОЯНИЕ') {
+        Write-SessionParseDebug -Stage 'ParseLine' -Message 'Skipped header line' -Data @{ RawLine = $raw }
+        return $null
+    }
+
+    if ($raw -match '^\s*-+\s*$') {
+        Write-SessionParseDebug -Stage 'ParseLine' -Message 'Skipped separator line' -Data @{ RawLine = $raw }
+        return $null
+    }
+
+    $compact = ($raw -replace '\s{2,}', '|').Trim('|',' ')
+
+    Write-SessionParseDebug -Stage 'ParseLine' -Message 'Normalized line' -Data @{
+        RawLine  = $raw
+        Compact  = $compact
+    }
+
+    if ([string]::IsNullOrWhiteSpace($compact)) {
+        Write-SessionParseDebug -Stage 'ParseLine' -Message 'Skipped because compact line is empty'
+        return $null
+    }
+
+    $parts = $compact -split '\|'
+
+    Write-SessionParseDebug -Stage 'ParseLine' -Message 'Split parts' -Data @{
+        PartCount = $parts.Count
+        Parts     = ($parts | ForEach-Object { "[{0}]" -f $_ }) -join ', '
+    }
+
+    if ($parts.Count -lt 2) {
+        Write-SessionParseDebug -Stage 'ParseLine' -Message 'Rejected because part count < 2' -Data @{
+            Compact = $compact
+        }
+        return $null
+    }
+
+    $idIndex = -1
+    for ($i = 0; $i -lt $parts.Count; $i++) {
+        if ($parts[$i] -match '^\d+$') {
+            $idIndex = $i
+            break
+        }
+    }
+
+    if ($idIndex -lt 0) {
+        Write-SessionParseDebug -Stage 'ParseLine' -Message 'Rejected because no numeric ID was found' -Data @{
+            Compact = $compact
+            Parts   = ($parts | ForEach-Object { "[{0}]" -f $_ }) -join ', '
+        }
+        return $null
+    }
+
+    $sessionId   = [int]$parts[$idIndex]
+    $sessionName = ''
+    $userName    = ''
+    $state       = ''
+    $type        = ''
+    $device      = ''
+
+    switch ($idIndex) {
+        1 {
+            $sessionName = ($parts[0]).Trim()
+            $userName    = ''
+        }
+        2 {
+            $sessionName = ($parts[0]).Trim()
+            $userName    = ($parts[1]).Trim()
+        }
+        default {
+            $sessionName = ($parts[0]).Trim()
+            $userName    = ($parts[1]).Trim()
+        }
+    }
+
+    if ($parts.Count -gt ($idIndex + 1)) { $state  = ($parts[$idIndex + 1]).Trim() }
+    if ($parts.Count -gt ($idIndex + 2)) { $type   = ($parts[$idIndex + 2]).Trim() }
+    if ($parts.Count -gt ($idIndex + 3)) { $device = ($parts[$idIndex + 3]).Trim() }
+
+    if ([string]::IsNullOrWhiteSpace($sessionName)) {
+        switch ($sessionId) {
+            0       { $sessionName = 'services' }
+            1       { $sessionName = 'console' }
+            65536   { $sessionName = 'rdp-tcp' }
+            default { $sessionName = 'unknown' }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($userName) -or $userName -eq '.') {
+        $userName = ''
+    }
+
+    $originalState = $state
+    switch -Regex ($state) {
+        '^(Активно|Active|Conn|Connected)$' { $state = 'Active'; break }
+        '^(Диск|Disc|Disconnected)$' { $state = 'Disconnected'; break }
+        '^(Прием|Listen|Listening)$' { $state = 'Listen'; break }
+        '^(Подключено)$' { $state = 'Connected'; break }
+        default {
+            if ([string]::IsNullOrWhiteSpace($state)) {
+                if ($sessionName -eq 'rdp-tcp') { $state = 'Listen' } else { $state = 'Unknown' }
+            }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($type)) {
+        switch -Regex ($sessionName) {
+            '^console$'   { $type = 'Console'; break }
+            '^services$'  { $type = 'Services'; break }
+            '^rdp-tcp$'   { $type = 'Listener'; break }
+            'rdp-tcp#\d+' { $type = 'RDP'; break }
+            default       { $type = 'Unknown' }
+        }
+    }
+
+    $obj = [PSCustomObject]@{
+        SessionName = $sessionName
+        UserName    = $userName
+        SessionId   = $sessionId
+        State       = $state
+        Type        = $type
+        Device      = $device
+        IsCurrent   = $isCurrent
+        Source      = 'query/qwinsta-direct'
+    }
+
+    Write-SessionParseDebug -Stage 'ParseLine' -Message 'Parsed session object' -Data @{
+        SessionName   = $obj.SessionName
+        UserName      = $obj.UserName
+        SessionId     = $obj.SessionId
+        OriginalState = $originalState
+        State         = $obj.State
+        Type          = $obj.Type
+        IsCurrent     = $obj.IsCurrent
+    }
+
+    return $obj
+}
+
 function Convert-SessionStateToEnglish {
     <#
     Author: Mikhail Deynekin
@@ -693,6 +900,76 @@ function Enable-RDPShadowPermissions {
         return $false
     }
 }
+
+function Get-RawTerminalSessionText {
+    [CmdletBinding()]
+    param(
+        [string]$ComputerName = $env:COMPUTERNAME
+    )
+
+    $text = $null
+    $source = $null
+
+    Write-SessionParseDebug -Stage 'RawText' -Message 'Starting terminal session text collection' -Data @{
+        ComputerName = $ComputerName
+        IsLocal      = ($ComputerName -eq $env:COMPUTERNAME -or $ComputerName -in @('.', 'localhost', '127.0.0.1'))
+    }
+
+    try {
+        if ($ComputerName -eq $env:COMPUTERNAME -or $ComputerName -in @('.', 'localhost', '127.0.0.1')) {
+            $text = (query session 2>$null | Out-String)
+            $source = 'query session'
+        }
+        else {
+            $text = (query session /server:$ComputerName 2>$null | Out-String)
+            $source = "query session /server:$ComputerName"
+        }
+
+        Write-SessionParseDebug -Stage 'RawText' -Message 'Primary command executed' -Data @{
+            Source   = $source
+            HasText  = -not [string]::IsNullOrWhiteSpace($text)
+            Length   = if ($null -ne $text) { $text.Length } else { 0 }
+            Preview  = if ($text) { ($text -split "`r?`n" | Select-Object -First 10) -join ' || ' } else { '' }
+        }
+    }
+    catch {
+        Write-SessionParseDebug -Stage 'RawText' -Message 'Primary command failed' -Data @{
+            Source = if ($source) { $source } else { 'query session' }
+            Error  = $_.Exception.Message
+        }
+        $text = $null
+    }
+
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        try {
+            if ($ComputerName -eq $env:COMPUTERNAME -or $ComputerName -in @('.', 'localhost', '127.0.0.1')) {
+                $text = (qwinsta 2>$null | Out-String)
+                $source = 'qwinsta'
+            }
+            else {
+                $text = (qwinsta /server:$ComputerName 2>$null | Out-String)
+                $source = "qwinsta /server:$ComputerName"
+            }
+
+            Write-SessionParseDebug -Stage 'RawText' -Message 'Fallback command executed' -Data @{
+                Source   = $source
+                HasText  = -not [string]::IsNullOrWhiteSpace($text)
+                Length   = if ($null -ne $text) { $text.Length } else { 0 }
+                Preview  = if ($text) { ($text -split "`r?`n" | Select-Object -First 10) -join ' || ' } else { '' }
+            }
+        }
+        catch {
+            Write-SessionParseDebug -Stage 'RawText' -Message 'Fallback command failed' -Data @{
+                Source = if ($source) { $source } else { 'qwinsta' }
+                Error  = $_.Exception.Message
+            }
+            $text = $null
+        }
+    }
+
+    return $text
+}
+
 
 function Test-ShadowSupport {
     # Check if shadowing is supported and configured
@@ -1205,25 +1482,52 @@ function Test-RdpDisplaySession {
     [OutputType([bool])]
     param(
         [Parameter(Mandatory)]
-        [object] $Session
+        [object]$Session
     )
 
     $sessionId   = $null
     $sessionName = ''
     $userName    = ''
     $stateName   = Get-SessionStateName -Session $Session
-    $typeName    = Get-SessionTypeName -Session $Session
+    $typeName    = Get-SessionTypeName  -Session $Session
+    $isCurrent   = $false
 
-    try { $sessionId = [int]$Session.SessionId } catch { $sessionId = $null }
+    try { $sessionId   = [int]$Session.SessionId } catch { $sessionId = $null }
     try { $sessionName = [string]$Session.SessionName } catch { $sessionName = '' }
     try { $userName    = [string]$Session.UserName } catch { $userName = '' }
+    try { $isCurrent   = [bool]$Session.IsCurrent } catch { $isCurrent = $false }
 
-    if ($sessionId -in 0, 65536) { return $false }
-    if ($sessionName -in 'services', 'console', 'rdp-tcp') { return $false }
-    if ($typeName -in 'Services', 'Listener', 'Console') { return $false }
-    if ([string]::IsNullOrWhiteSpace($userName) -or $userName -eq 'SYSTEM') { return $false }
+    if ($sessionId -in @(0, 65536)) { return $false }
+    if ([string]::IsNullOrWhiteSpace($sessionName)) { $sessionName = '' }
+    if ([string]::IsNullOrWhiteSpace($userName))    { $userName = '' }
 
-    if ($stateName -eq 'Active' -or $typeName -eq 'RDP' -or $sessionName -match '^rdp-tcp#') {
+    if ($sessionName -eq 'services') { return $false }
+
+    if ($sessionName -eq 'rdp-tcp' -and [string]::IsNullOrWhiteSpace($userName)) {
+        return $false
+    }
+
+    if ($typeName -in @('Services', 'Listener')) {
+        return $false
+    }
+
+    if ($userName -eq 'SYSTEM') {
+        return $false
+    }
+
+    if ($isCurrent) {
+        return $true
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($userName) -and $stateName -in @('Active', 'Disconnected')) {
+        return $true
+    }
+
+    if ($typeName -eq 'RDP' -and -not [string]::IsNullOrWhiteSpace($userName)) {
+        return $true
+    }
+
+    if ($sessionName -eq 'console' -and -not [string]::IsNullOrWhiteSpace($userName)) {
         return $true
     }
 
@@ -1261,29 +1565,23 @@ function Format-StatisticsLines {
 # ---------------------------------------------------------------------------
 # MAIN FUNCTION
 # ---------------------------------------------------------------------------
+<#
+.SYNOPSIS
+Displays comprehensive RDP session analysis with native IP correlation.
+.DESCRIPTION
+Uses Get-RdpAnalysisResult if available. Falls back to a robust native engine that:
+1. Queries active TCP connections on port 3389 (LocalPort)
+2. Parses Security Event Log ID 4624 (Logon Type 10 = RDP)
+3. Correlates IPs to sessions via username, state, and heuristics
+Provides detailed -DebugMode logging for every matching step.
+.AUTHOR
+Mikhail Deynekin
+Website: https://deynekin.com
+Email:   Mikhail@Deynekin.com
+.VERSION
+1.3.3 - Fixed -LocalPort 3389 discovery; robust Event 4624 parsing (Props + Regex fallback); per-session correlation debug logging
+#>
 function Show-SessionsPS7 {
-    <#
-    .SYNOPSIS
-        Displays a concise RDP analysis report for the -Sessions mode.
-
-    .DESCRIPTION
-        Uses the same data model as qwinsta_IP_PS7.ps1 (AnalysisResult)
-        and formats output in a console-friendly style similar to -Status.
-        IP addresses and sources are taken from the correlated data
-        (connections + matches), not from qwinsta only.
-
-    .PARAMETER HoursBack
-        Number of hours of history to analyze.
-
-    .PARAMETER ComputerName
-        Target computer name.
-
-    .PARAMETER Quiet
-        Suppress the summary header.
-
-    .EXAMPLE
-        Show-SessionsPS7 -HoursBack 24 -ComputerName ILAB
-    #>
     [CmdletBinding()]
     param(
         [int]    $HoursBack    = 24,
@@ -1291,20 +1589,225 @@ function Show-SessionsPS7 {
         [switch] $Quiet
     )
 
-    # 1. Get full analysis result from the same core logic as qwinsta_IP_PS7.ps1
-    if (-not (Get-Command -Name Get-RdpAnalysisResult -ErrorAction SilentlyContinue)) {
-        Write-Host 'Get-RdpAnalysisResult is not available in the current context.' -ForegroundColor $script:COLORS.Error
-        return
+    # -------------------------------------------------------------------------
+    # 1. Attempt external analyzer first
+    # -------------------------------------------------------------------------
+    $result = $null
+    try {
+        if (Get-Command -Name Get-RdpAnalysisResult -ErrorAction SilentlyContinue) {
+            Write-DebugLog "Attempting external RDP analyzer..." DEBUG
+            $result = Get-RdpAnalysisResult -HoursBack $HoursBack -ComputerName $ComputerName -UseQwinsta:$true -UseNetstat:$true -Quiet:$true -ErrorAction Stop
+            if (-not $result) { throw 'Analyzer returned null' }
+        }
+    }
+    catch {
+        Write-DebugLog "External analyzer failed or unavailable: $($_.Exception.Message)" WARNING @{
+            Fallback = 'NativeCorrelationEngine'
+        }
     }
 
-    $result = Get-RdpAnalysisResult -HoursBack $HoursBack -ComputerName $ComputerName -UseQwinsta:$true -UseNetstat:$true -Quiet:$true
-
+    # -------------------------------------------------------------------------
+    # 2. Native Correlation Engine (executes if analyzer fails/missing)
+    # -------------------------------------------------------------------------
     if (-not $result) {
-        Write-Host 'Failed to get RDP analysis result.' -ForegroundColor $script:COLORS.Error
+        Write-DebugLog "Launching native IP correlation engine" DEBUG @{
+            ComputerName = $ComputerName
+            HoursBack    = $HoursBack
+        }
+
+        # 2.1 Get raw sessions
+        $rawSessions = @()
+        if (Get-Command -Name Get-WtsSessionsEn -ErrorAction SilentlyContinue) {
+            $rawSessions = @(Get-WtsSessionsEn -ComputerName $ComputerName -IncludeSystem)
+        } else {
+            Write-DebugLog "Get-WtsSessionsEn missing, cannot build session list" ERROR
+            Write-Host '[ERROR] Session enumeration engine not found.' -ForegroundColor $script:COLORS.Error
+            return
+        }
+        Write-DebugLog "Raw sessions collected: $($rawSessions.Count)" DEBUG
+
+        # 2.2 Resolve Local IP (for console)
+        $localIp = '127.0.0.1'
+        try {
+            $localIp = (Get-NetIPAddress -AddressFamily IPv4 -PrefixOrigin Dhcp,Manual -ErrorAction SilentlyContinue | 
+                       Where-Object { $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1).IPAddress
+        } catch { }
+
+        # 2.3 Resolve Active External IP via Network Stack
+        $activeExtIp = $null
+        $recentConnections = @()
+        try {
+            # CRITICAL FIX: Server-side RDP listens on LOCAL port 3389
+            $conns = @(Get-NetTCPConnection -LocalPort 3389 -State Established -ErrorAction SilentlyContinue)
+            Write-DebugLog "Get-NetTCPConnection returned $($conns.Count) established local RDP streams" DEBUG
+            
+            foreach ($c in $conns) {
+                $rip = $c.RemoteAddress -replace '^::ffff:', '' # Normalize IPv4-mapped IPv6
+                if ($rip -match '^\d+\.\d+\.\d+\.\d+$' -and $rip -notin @('127.0.0.1', '0.0.0.0', $localIp)) {
+                    # Store first valid external IP as primary fallback
+                    if ($null -eq $activeExtIp) {
+                        $activeExtIp = $rip
+                    }
+                    $recentConnections += [PSCustomObject]@{
+                        Time = $c.CreationTime ?? (Get-Date); User = "Network"; IP = $rip; Type = "Active Connection"
+                        EventID = 0; QwinstaSessionID = "N/A"; Source = "NetTCPConnection"; IsActive = $true
+                    }
+                }
+            }
+        }
+        catch {
+            Write-DebugLog "Get-NetTCPConnection failed, falling back to netstat" WARNING @{ Error = $_.Exception.Message }
+            try {
+                $netOut = netstat -ano 2>$null | Select-String ":3389\s"
+                foreach ($ln in $netOut) {
+                    if ($ln -match '\s+\S+:\d+\s+(\S+):\d+\s+ESTABLISHED\s+(\d+)') {
+                        $rip = $matches[1]
+                        if ($rip -notin @('127.0.0.1', '::1', $localIp) -and $rip -match '^\d+\.\d+\.\d+\.\d+$') {
+                            if ($null -eq $activeExtIp) { $activeExtIp = $rip }
+                            $recentConnections += [PSCustomObject]@{
+                                Time = Get-Date; User = "Netstat"; IP = $rip; Type = "Active Connection"
+                                EventID = 0; QwinstaSessionID = "N/A"; Source = "Netstat"; IsActive = $true
+                            }
+                        }
+                    }
+                }
+                Write-DebugLog "Netstat fallback found $($recentConnections.Count) connections" DEBUG
+            } catch { }
+        }
+
+        # 2.4 Event Log Correlation (4624 Logon Type 10 = RDP)
+        $logMatches = @{}
+        try {
+            $startTime = (Get-Date).AddHours(-$HoursBack)
+            $events = Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4624; StartTime=$startTime} -MaxEvents 300 -ErrorAction SilentlyContinue
+            Write-DebugLog "Event Log query returned $($events.Count) events (ID 4624)" DEBUG
+            
+            foreach ($evt in $events) {
+                $foundUser = $null; $foundIp = $null
+                # Method 1: Properties array (Win10/11 standard indices)
+                try {
+                    $props = $evt.Properties
+                    if ($props.Count -ge 19) {
+                        $logonType = $props[8].Value
+                        $ipAddr    = $props[18].Value
+                        $userName  = $props[5].Value
+                        if ($logonType -eq 10 -and -not [string]::IsNullOrWhiteSpace($ipAddr)) {
+                            $foundUser = $userName; $foundIp = $ipAddr
+                        }
+                    }
+                } catch { }
+                
+                # Method 2: Regex fallback (EN + RU locales)
+                if (-not $foundIp -and $evt.Message) {
+                    if ($evt.Message -match '(?m)(Target Account Name|Имя учетной записи):\s+(\S+)') { $foundUser = $matches[2] }
+                    if ($evt.Message -match '(?m)(Ip Address|IP-адрес):\s+(\d+\.\d+\.\d+\.\d+)') { $foundIp = $matches[2] }
+                    if ($evt.Message -match '(?m)(Logon Type|Тип входа):\s+(10)') { $foundUser = $foundUser } else { $foundUser = $null }
+                }
+
+                if ($foundIp -and $foundIp -notin @('127.0.0.1', '::1', '-') -and $foundUser -notmatch '^(SYSTEM|LOCAL SERVICE|NETWORK SERVICE|-)$') {
+                    $key = $foundUser.ToLower()
+                    if (-not $logMatches.ContainsKey($key)) {
+                        $logMatches[$key] = $foundIp
+                        Write-DebugLog "Event Log match: User='$foundUser' -> IP='$foundIp'" DEBUG
+                    }
+                }
+            }
+        }
+        catch {
+            Write-DebugLog "Event Log query skipped or failed: $($_.Exception.Message)" DEBUG
+        }
+
+        # 2.5 Correlate IPs to Sessions
+        $sessionsList = @()
+        $matchesList  = @()
+        $fallbackIp   = $activeExtIp
+
+        Write-DebugLog "Starting session correlation loop" DEBUG
+        foreach ($s in $rawSessions) {
+            $sName = $s.SessionName; $uName = $s.UserName; $sId = $s.SessionId
+            $state = $s.State; $type = $s.Type; $isCur = $s.IsCurrent
+            $assignedIp = $null; $conf = 'Low'; $src = 'Most Recent Common IP'
+
+            # Rule 1: Console -> Local IP
+            if ($sName -eq 'console') {
+                $assignedIp = $localIp; $conf = 'High'; $src = 'Local Machine IP'
+                Write-DebugLog "Session '$sName' (ID:$sId): Console rule -> $assignedIp ($src)" DEBUG
+            }
+            # Rule 2: Active RDP -> Active External IP (Netstat/TCP)
+            elseif ($type -eq 'RDP' -and $state -in @('Active','Connected') -and $activeExtIp) {
+                $assignedIp = $activeExtIp; $conf = 'High'; $src = 'Netstat'
+                Write-DebugLog "Session '$sName' (ID:$sId): Active RDP rule -> $assignedIp ($src)" DEBUG
+            }
+            # Rule 3: Match Event Log IP by Username
+            elseif ($uName -and $logMatches.ContainsKey($uName.ToLower())) {
+                $assignedIp = $logMatches[$uName.ToLower()]; $conf = 'High'; $src = 'Event Log (4624)'
+                Write-DebugLog "Session '$sName' (ID:$sId): Event Log username match -> $assignedIp ($src)" DEBUG
+            }
+            # Rule 4: Disconnected/Other -> Most Recent Common External IP
+            elseif ($fallbackIp -and $sName -ne 'rdp-tcp' -and $type -notin @('Services','Listener')) {
+                $assignedIp = $fallbackIp; $conf = 'Low'; $src = 'Most Recent Common IP'
+                Write-DebugLog "Session '$sName' (ID:$sId): Heuristic fallback -> $assignedIp ($src)" DEBUG
+            }
+            else {
+                Write-DebugLog "Session '$sName' (ID:$sId): No IP match found" DEBUG
+            }
+
+            # Enrich session object
+            $s | Add-Member -NotePropertyName 'IPAddress' -NotePropertyValue $assignedIp -Force
+            $s | Add-Member -NotePropertyName 'Source'    -NotePropertyValue 'qwinsta' -Force
+
+            # Build match record if IP found
+            if ($assignedIp) {
+                $matchesList += [PSCustomObject]@{
+                    SessionName    = $sName; Username = $uName; SessionId = $sId; SessionState = $state
+                    SessionType    = $type; MatchedIP = $assignedIp; TimeDifference = $null
+                    Confidence     = $conf; MatchedSource = $src
+                }
+            }
+            $sessionsList += $s
+        }
+
+        # 2.6 Compute Statistics
+        $display  = @($sessionsList | Where-Object { -not $_.IsSystem -and $_.SessionId -notin @(0, 65536) -and $_.UserName -ne 'SYSTEM' })
+        $active   = @($display | Where-Object { $_.State -in @('Active','Connected') }).Count
+        $rdpC     = @($display | Where-Object { $_.Type -eq 'RDP' }).Count
+        $conC     = @($display | Where-Object { $_.Type -eq 'Console' }).Count
+        $uIPs     = @($matchesList.MatchedIP | Select-Object -Unique).Count
+        $intC     = @($matchesList.MatchedIP | Where-Object { $_ -match '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)' }).Count
+        $extC     = @($matchesList.MatchedIP | Where-Object { $_ -notmatch '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)' }).Count
+
+        Write-DebugLog "Statistics calculated: Total=$($display.Count) Active=$active RDP=$rdpC Matches=$($matchesList.Count) Connections=$($recentConnections.Count)" DEBUG
+
+        # Assemble final $result object
+        $result = [PSCustomObject]@{
+            ComputerName = $ComputerName
+            AnalysisTime = Get-Date
+            Sessions     = @($sessionsList | Where-Object { $_.State -in @('Active','Connected','Disconnected','Listen','Unknown') })
+            Connections  = $recentConnections
+            Matches      = $matchesList
+            Statistics   = [PSCustomObject]@{
+                TotalSessions    = $display.Count + @($sessionsList | Where-Object { $_.SessionId -in @(0,1,65536) }).Count
+                TotalConnections = $recentConnections.Count
+                MatchedSessions  = $matchesList.Count
+                ActiveSessions   = $active
+                RDPSessions      = $rdpC
+                ConsoleSessions  = $conC
+                UniqueIPs        = $uIPs
+                InternalIPs      = $intC
+                ExternalIPs      = $extC
+            }
+        }
+    }
+
+    # -------------------------------------------------------------------------
+    # 3. Safety check & Output Rendering
+    # -------------------------------------------------------------------------
+    if (-not $result) {
+        Write-Host '[ERROR] Failed to retrieve session data. Ensure local admin rights.' -ForegroundColor $script:COLORS.Error
         return
     }
 
-    # 2. Summary header (style similar to -Status)
+    # 3.1 Summary Header
     if (-not $Quiet) {
         Write-Host ''
         Write-Host 'RDP SESSION ANALYSIS' -ForegroundColor $script:COLORS.Header
@@ -1313,59 +1816,33 @@ function Show-SessionsPS7 {
         Write-Host ('Analysis Time : {0}' -f $result.AnalysisTime.ToString('HH:mm:ss dd.MM.yyyy')) -ForegroundColor $script:COLORS.Debug
         Write-Host ('Sessions Found: {0}' -f $result.Sessions.Count) -ForegroundColor $script:COLORS.Debug
         Write-Host ('Connections   : {0}' -f $result.Connections.Count) -ForegroundColor $script:COLORS.Debug
-        Write-Host ('IP Matches    : {0}' -f ($result.Statistics.MatchedSessions)) -ForegroundColor $script:COLORS.Debug
+        Write-Host ('IP Matches    : {0}' -f $result.Statistics.MatchedSessions) -ForegroundColor $script:COLORS.Debug
     }
 
-    # 3. Statistics block (╗╖ AnalysisResult.Statistics)
+    # 3.2 Statistics Block
     Write-Host ''
     Write-Host 'STATISTICS:' -ForegroundColor $script:COLORS.Header
     Write-Host '===========' -ForegroundColor $script:COLORS.Muted
-
     $stats = $result.Statistics
-    $statsOrder = @(
-        'TotalSessions',
-        'TotalConnections',
-        'MatchedSessions',
-        'ActiveSessions',
-        'RDPSessions',
-        'ConsoleSessions',
-        'UniqueIPs',
-        'InternalIPs',
-        'ExternalIPs'
-    )
-
+    $statsOrder = @('TotalSessions','TotalConnections','MatchedSessions','ActiveSessions','RDPSessions','ConsoleSessions','UniqueIPs','InternalIPs','ExternalIPs')
     foreach ($name in $statsOrder) {
         if ($stats.PSObject.Properties.Name -contains $name) {
             $label = switch ($name) {
-                'TotalSessions'    { 'Total Sessions' }
-                'TotalConnections' { 'Total Connections' }
-                'MatchedSessions'  { 'Matched Sessions' }
-                'ActiveSessions'   { 'Active Sessions' }
-                'RDPSessions'      { 'RDP Sessions' }
-                'ConsoleSessions'  { 'Console Sessions' }
-                'UniqueIPs'        { 'Unique IPs' }
-                'InternalIPs'      { 'Internal IPs' }
-                'ExternalIPs'      { 'External IPs' }
+                'TotalSessions'    { 'Total Sessions' }; 'TotalConnections' { 'Total Connections' }; 'MatchedSessions'  { 'Matched Sessions' }
+                'ActiveSessions'   { 'Active Sessions' }; 'RDPSessions'      { 'RDP Sessions' };    'ConsoleSessions'  { 'Console Sessions' }
+                'UniqueIPs'        { 'Unique IPs' };    'InternalIPs'        { 'Internal IPs' };   'ExternalIPs'      { 'External IPs' }
                 default            { $name }
             }
-
-            $value = $stats.$name
-            Write-Host ('{0,-18}: {1}' -f $label, $value) -ForegroundColor $script:COLORS.Debug
+            Write-Host ('{0,-18}: {1}' -f $label, $stats.$name) -ForegroundColor $script:COLORS.Debug
         }
     }
 
-    # 4. CURRENT RDP SESSIONS - from result.Sessions
+    # 3.3 CURRENT RDP SESSIONS
     Write-Host ''
     Write-Host 'CURRENT RDP SESSIONS:' -ForegroundColor $script:COLORS.Header
     Write-Host '=====================' -ForegroundColor $script:COLORS.Muted
-
     $sessionRows = @(
-        $result.Sessions |
-        Sort-Object SessionId |
-        ForEach-Object {
-            # IP ╒ RdpSession.IPAddress Ц╕╔ ╖═╞╝╚╜╔╜ ╒ Get-RdpAnalysis А ЦГЯБ╝╛ netstat + А╝║КБ╗╘. [file:2]
-            $ipDisplay = if ($_.IPAddress) { Format-IPForDisplay $_.IPAddress } else { 'N/A' }
-
+        $result.Sessions | Sort-Object SessionId | ForEach-Object {
             [PSCustomObject]@{
                 Session  = $_.SessionName
                 Username = $_.UserName
@@ -1373,36 +1850,31 @@ function Show-SessionsPS7 {
                 State    = $_.State
                 Type     = $_.Type
                 Current  = if ($_.IsCurrent) { '>' } else { '' }
-                IP       = $ipDisplay
-                Source   = $_.Source
+                IP       = if ($_.PSObject.Properties.Name -contains 'IPAddress' -and $_.IPAddress) { Format-IPForDisplay $_.IPAddress } else { 'N/A' }
+                Source   = if ($_.PSObject.Properties.Name -contains 'Source' -and $_.Source) { $_.Source } else { 'qwinsta' }
             }
         }
     )
-
     if ($sessionRows.Count -eq 0) {
         Write-Host 'No sessions found.' -ForegroundColor $script:COLORS.Warning
-    }
-    else {
-        $sessionRows |
-            Format-Table -AutoSize `
-                @{ Label = 'Session';  Expression = { $_.Session  } },
-                @{ Label = 'Username'; Expression = { $_.Username } },
-                @{ Label = 'ID';       Expression = { $_.ID       }; Alignment = 'Right' },
-                @{ Label = 'State';    Expression = { $_.State    } },
-                @{ Label = 'Type';     Expression = { $_.Type     } },
-                @{ Label = 'Current';  Expression = { $_.Current  } },
-                @{ Label = 'IP';       Expression = { $_.IP       } },
-                @{ Label = 'Source';   Expression = { $_.Source   } } |
-            Out-String |
-            ForEach-Object { Write-Host $_ -ForegroundColor $script:COLORS.Info -NoNewline }
+    } else {
+        $sessionRows | Format-Table -AutoSize `
+            @{ Label = 'Session';  Expression = { $_.Session  } },
+            @{ Label = 'Username'; Expression = { $_.Username } },
+            @{ Label = 'ID';       Expression = { $_.ID       }; Alignment = 'Right' },
+            @{ Label = 'State';    Expression = { $_.State    } },
+            @{ Label = 'Type';     Expression = { $_.Type     } },
+            @{ Label = 'Current';  Expression = { $_.Current  } },
+            @{ Label = 'IP';       Expression = { $_.IP       } },
+            @{ Label = 'Source';   Expression = { $_.Source   } } |
+            Out-String | ForEach-Object { Write-Host $_ -ForegroundColor $script:COLORS.Info -NoNewline }
     }
 
-    # 5. MATCHED SESSIONS WITH IP ADDRESSES - result.Matches
+    # 3.4 MATCHED SESSIONS WITH IP ADDRESSES
     if ($result.Matches.Count -gt 0) {
         Write-Host ''
         Write-Host 'MATCHED SESSIONS WITH IP ADDRESSES:' -ForegroundColor $script:COLORS.Header
         Write-Host '==================================' -ForegroundColor $script:COLORS.Muted
-
         $matchRows = $result.Matches |
             Where-Object { $_.Confidence -ne 'None' } |
             Sort-Object SessionId |
@@ -1419,20 +1891,16 @@ function Show-SessionsPS7 {
                     Source       = $_.MatchedSource
                 }
             }
-
-        $matchRows |
-            Format-Table -AutoSize `
-                Session, Username, ID, SessionState, Type, MatchedIP, TimeDiff, Confidence, Source |
-            Out-String |
-            ForEach-Object { Write-Host $_ -ForegroundColor $script:COLORS.Info -NoNewline }
+        $matchRows | Format-Table -AutoSize `
+            Session, Username, ID, SessionState, Type, MatchedIP, TimeDiff, Confidence, Source |
+            Out-String | ForEach-Object { Write-Host $_ -ForegroundColor $script:COLORS.Info -NoNewline }
     }
 
-    # 6. RECENT RDP CONNECTIONS - result.Connections (top 10)
+    # 3.5 RECENT RDP CONNECTIONS
     if ($result.Connections.Count -gt 0) {
         Write-Host ''
         Write-Host ("RECENT RDP CONNECTIONS (Last {0} hours):" -f $HoursBack) -ForegroundColor $script:COLORS.Header
         Write-Host '==========================================' -ForegroundColor $script:COLORS.Muted
-
         $connRows = $result.Connections |
             Sort-Object Time -Descending |
             Select-Object -First 10 |
@@ -1448,14 +1916,10 @@ function Show-SessionsPS7 {
                     Active    = if ($_.IsActive) { 'Yes' } else { 'No' }
                 }
             }
-
-        $connRows |
-            Format-Table -AutoSize `
-                Time, User, IP, Type, EventID, SessionID, Source, Active |
-            Out-String |
-            ForEach-Object { Write-Host $_ -ForegroundColor $script:COLORS.Debug -NoNewline }
+        $connRows | Format-Table -AutoSize `
+            Time, User, IP, Type, EventID, SessionID, Source, Active |
+            Out-String | ForEach-Object { Write-Host $_ -ForegroundColor $script:COLORS.Debug -NoNewline }
     }
-
     Write-Host ''
 }
 
@@ -1612,77 +2076,70 @@ function Parse-QwinstaLine-Loose {
 }
 
 function Get-RDPSessionsPS7 {
+    <#
+    .SYNOPSIS
+        Returns normalized RDP session list for PowerShell 7.
+
+    .DESCRIPTION
+        Delegates all session enumeration to qwinsta-en.ps1 and does not parse
+        raw qwinsta/query output locally anymore.
+
+    .NOTES
+        Function Version: 2.1.0
+    #>
     [CmdletBinding()]
     [OutputType([object[]])]
     param(
-        [string] $ComputerName = $env:COMPUTERNAME,
-        [switch] $ExtendedInfo
+        [string]$ComputerName = $env:COMPUTERNAME,
+        [switch]$ExtendedInfo,
+        [switch]$ActiveOnly
     )
 
-    $sessions = [System.Collections.Generic.List[object]]::new()
-
     try {
-        if ($ComputerName -eq $env:COMPUTERNAME) {
-            $rawOutput = & qwinsta 2>$null
-        }
-        else {
-            $rawOutput = & qwinsta "/server:$ComputerName" 2>$null
-        }
+        Initialize-QwinstaEngine | Out-Null
 
-        if (-not $rawOutput) {
-            return @()
+        Write-DebugLog 'Retrieving sessions via qwinsta-en.ps1' DEBUG @{
+            ComputerName = $ComputerName
+            ExtendedInfo = $ExtendedInfo.IsPresent
+            ActiveOnly   = $ActiveOnly.IsPresent
         }
 
-        $lines = @($rawOutput -split "`r?`n")
-        foreach ($line in $lines) {
-            $session = Parse-QwinstaLine-Loose -Line $line
-            if ($null -ne $session) {
-                $sessions.Add($session)
-            }
+        $sessions = @(
+            Get-WtsSessionsEn -ComputerName $ComputerName -IncludeSystem -WtsDebugMode:$DebugMode
+        )
+
+        $sessions = @(
+            $sessions |
+            Where-Object { -not $_.IsSystem }
+        )
+
+        if ($ActiveOnly) {
+            $sessions = @(
+                $sessions |
+                Where-Object { $_.State -in @('Active', 'Connected') }
+            )
         }
 
-        if ($sessions.Count -eq 0) {
-            return @()
+        $sessions = @(
+            $sessions |
+            Sort-Object SessionId |
+            Select-Object SessionId, SessionName, UserName, State, Type, IsCurrent, Domain, ClientName
+        )
+
+        Write-DebugLog 'Get-RDPSessionsPS7 completed' DEBUG @{
+            Count = $sessions.Count
+            Items = ($sessions | ForEach-Object {
+                "ID=$($_.SessionId);User=$($_.UserName);State=$($_.State);Type=$($_.Type);Current=$($_.IsCurrent)"
+            }) -join ' || '
         }
 
-        $normalized = foreach ($s in $sessions) {
-            $sessionName = [string]$s.SessionName
-            $userName    = [string]$s.UserName
-            $sessionId   = [int]$s.SessionId
-            $state       = [string]$s.State
-            $type        = [string]$s.Type
-
-            # Final normalization for problematic rows
-            if ($sessionName -eq 'console' -and $userName -eq 'SYSTEM') {
-                $userName = 'console'
-            }
-
-            if ($sessionName -eq 'services' -and $userName -eq 'SYSTEM') {
-                $userName = 'services'
-            }
-
-            if ($sessionName -eq 'rdp-tcp' -and $userName -eq 'SYSTEM') {
-                $userName = 'rdp-tcp'
-            }
-
-            [PSCustomObject]@{
-                SessionName = $sessionName
-                UserName    = $userName
-                SessionId   = $sessionId
-                State       = $state
-                Type        = $type
-                Device      = $s.Device
-                IsCurrent   = [bool]$s.IsCurrent
-                Source      = $s.Source
-                RawState    = $s.RawState
-                RawType     = $s.RawType
-                RawLine     = $s.RawLine
-            }
-        }
-
-        return @($normalized | Sort-Object SessionId)
+        return $sessions
     }
     catch {
+        Write-DebugLog 'Error in Get-RDPSessionsPS7' ERROR @{
+            Error      = $_.Exception.Message
+            StackTrace = $_.ScriptStackTrace
+        }
         return @()
     }
 }
@@ -4077,6 +4534,31 @@ Reason: $reasonDescription
     }
 }
 
+function safe {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0)]
+        $Value,
+
+        [Parameter(Position = 1)]
+        $Fallback = 'NA'
+    )
+
+    if ($null -eq $Value -or $Value -is [System.DBNull]) {
+        return $Fallback
+    }
+
+    try {
+        if ($Value -is [string] -and [string]::IsNullOrWhiteSpace($Value)) {
+            return $Fallback
+        }
+    }
+    catch {
+    }
+
+    return $Value
+}
+
 function Show-SystemStatus {
     <#
     .SYNOPSIS
@@ -4105,116 +4587,113 @@ function Show-SystemStatus {
     
     [CmdletBinding()]
     param(
-        [Parameter()]
         [switch]$Brief,
-        
-        [Parameter()]
         [string]$ExportJson,
-        
-        [Parameter()]
         [string]$ExportCsv,
-        
-        [Parameter()]
         [switch]$IncludePerformance
     )
-    
+
     begin {
-        Write-DebugLog "Generating comprehensive system status report..." "INFO"
-        
-        # Determine PowerShell version and use appropriate implementation
+        Write-DebugLog "Generating comprehensive system status report..." INFO
+
         $IsPS7Plus = $PSVersionTable.PSVersion.Major -ge 7
-        
-        # Initialize status object
+
         $statusReport = [PSCustomObject]@{
-            Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
-            ComputerName = $env:COMPUTERNAME
-            User = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+            Timestamp         = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
+            ComputerName      = $env:COMPUTERNAME
+            User              = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
             PowerShellVersion = $PSVersionTable.PSVersion.ToString()
-            IsAdministrator = $false
-            OSVersion = $null
-            RDPConfiguration = $null
+            IsAdministrator   = $false
+            OSVersion         = $null
+            RDPConfiguration  = $null
             ShadowConfiguration = $null
-            FirewallStatus = $null
-            ServiceStatus = $null
-            ActiveSessions = $null
-            Recommendations = @()
+            FirewallStatus    = $null
+            ServiceStatus     = $null
+            ActiveSessions    = $null
+            Recommendations   = @()
             PerformanceMetrics = $null
-            GenerationTime = $null
+            GenerationTime    = $null
         }
-        
-        # Define colors based on PS version
+
         if ($IsPS7Plus) {
-            # PowerShell 7+ supports ANSI colors and $PSStyle
-$Color = @{
-    Header  = "`e[96m"   # Bright Cyan
-    Success = "`e[92m"   # Bright Green
-    Warning = "`e[93m"   # Bright Yellow
-    Error   = "`e[91m"   # Bright Red
-    Info    = "`e[96m"   # Bright Cyan
-    Debug   = "`e[90m"   # Dark Gray
-    Reset   = "`e[0m"    # Reset all
-            }
-        } else {
-            # PowerShell 5.1 fallback colors
             $Color = @{
-                Header = "Cyan"
-                Success = "Green"
-                Warning = "Yellow"
-                Error = "Red"
-                Info = "Cyan"
-                Debug = "Gray"
-                Reset = ""
+                Header  = "`e[96m"
+                Success = "`e[92m"
+                Warning = "`e[93m"
+                Error   = "`e[91m"
+                Info    = "`e[96m"
+                Debug   = "`e[90m"
+                Reset   = "`e[0m"
+            }
+        }
+        else {
+            $Color = @{
+                Header  = 'Cyan'
+                Success = 'Green'
+                Warning = 'Yellow'
+                Error   = 'Red'
+                Info    = 'Cyan'
+                Debug   = 'Gray'
+                Reset   = ''
             }
         }
     }
-    
+
     process {
         try {
-            # Get comprehensive status data
             if ($IsPS7Plus) {
                 $statusData = Get-SystemStatusDataPS7 -IncludePerformance:$IncludePerformance
-            } else {
+            }
+            else {
                 $statusData = Get-SystemStatusDataPS5 -IncludePerformance:$IncludePerformance
             }
-            
-            # Update status report object
-            $statusReport.IsAdministrator = $statusData.IsAdministrator
-            $statusReport.OSVersion = $statusData.OSVersion
-            $statusReport.RDPConfiguration = $statusData.RDPConfiguration
+
+            if (-not $statusData) {
+                throw "Status data generation returned null."
+            }
+
+            $statusReport.IsAdministrator    = $statusData.IsAdministrator
+            $statusReport.OSVersion          = $statusData.OSVersion
+            $statusReport.RDPConfiguration   = $statusData.RDPConfiguration
             $statusReport.ShadowConfiguration = $statusData.ShadowConfiguration
-            $statusReport.FirewallStatus = $statusData.FirewallStatus
-            $statusReport.ServiceStatus = $statusData.ServiceStatus
-            $statusReport.ActiveSessions = $statusData.ActiveSessions
-            $statusReport.Recommendations = $statusData.Recommendations
+            $statusReport.FirewallStatus     = $statusData.FirewallStatus
+            $statusReport.ServiceStatus      = $statusData.ServiceStatus
+            $statusReport.ActiveSessions     = $statusData.ActiveSessions
+            $statusReport.Recommendations    = $statusData.Recommendations
             $statusReport.PerformanceMetrics = $statusData.PerformanceMetrics
-            $statusReport.GenerationTime = $statusData.GenerationTime
-            
-            # Display report
+            $statusReport.GenerationTime     = $statusData.GenerationTime
+
             if ($IsPS7Plus) {
                 Show-StatusReportPS7 -StatusData $statusData -Brief:$Brief -Color $Color
-            } else {
+            }
+            else {
                 Show-StatusReportPS5 -StatusData $statusData -Brief:$Brief -Color $Color
             }
-            
-            # Export data if requested
+
             if ($ExportJson) {
                 Export-StatusJson -StatusData $statusReport -Path $ExportJson
             }
-            
+
             if ($ExportCsv) {
                 Export-StatusCsv -StatusData $statusReport -Path $ExportCsv
             }
-            
+
             return $statusReport
-            
-        } catch {
-            Write-DebugLog "Error generating system status: $($_.Exception.Message)" "ERROR"
-            Write-Host "Failed to generate complete status report." -ForegroundColor $Color.Error
+        }
+        catch {
+            Write-DebugLog "Error generating system status: $($_.Exception.Message)" ERROR
+
+            if ($IsPS7Plus) {
+                Write-Host "$($Color.Error)Failed to generate complete status report.$($Color.Reset)"
+            }
+            else {
+                Write-Host "Failed to generate complete status report." -ForegroundColor Red
+            }
+
             return $null
         }
     }
 }
-
 #region PowerShell 5.1 Implementation
 function Get-SystemStatusDataPS5 {
     param([switch]$IncludePerformance)
@@ -4589,7 +5068,9 @@ else {
     }
     
     # Section 7: Performance Metrics (if enabled)
-    if ($StatusData.PerformanceMetrics -and -not $StatusData.PerformanceMetrics.Error) {
+    if ($StatusData.PerformanceMetrics -and -not (
+        $null -ne $StatusData.PerformanceMetrics.PSObject.Properties['Error'] -and
+        $StatusData.PerformanceMetrics.Error)) {
         Write-Host "`n[7] PERFORMANCE METRICS" -ForegroundColor $Color.Header
         Write-Host "   CPU Usage    : $($StatusData.PerformanceMetrics.CPUUsagePercent)%" -ForegroundColor $Color.Debug
         Write-Host "   Memory Usage : $($StatusData.PerformanceMetrics.MemoryUsagePercent)%" -ForegroundColor $Color.Debug
@@ -4655,27 +5136,175 @@ function Show-BriefStatusPS5 {
 
 #region PowerShell 7+ Implementation with Modern Features
 function Get-SystemStatusDataPS7 {
-    param([switch]$IncludePerformance)
-    
+    <#
+    .SYNOPSIS
+        Collects all PS7 system status data for the status report.
+
+    .DESCRIPTION
+        Uses qwinsta-en.ps1 for session data when available.
+        Falls back to the legacy Get-RDPSessions path if the external engine is missing.
+        Each sub-collector is wrapped individually so one failure does not
+        prevent the rest of the report from being generated.
+
+    .NOTES
+        Function Version: 2.0.0
+    #>
+    [CmdletBinding()]
+    param(
+        [switch]$IncludePerformance,
+        [string]$ComputerName = $env:COMPUTERNAME
+    )
+
     $statusStartTime = Get-Date
-    
-    # Use PowerShell 7+ features for parallel data collection
-    $statusData = [PSCustomObject]@{
-        IsAdministrator = Test-IsAdministrator
-        OSVersion = Get-OSVersionInfoPS7
-        RDPConfiguration = Get-RDPConfigurationPS7
-        ShadowConfiguration = Get-ShadowConfigurationPS7
-        FirewallStatus = Get-FirewallStatusPS7
-        ServiceStatus = Get-ServiceStatusPS7
-        ActiveSessions = Get-ActiveSessionsPS7
-        Recommendations = Get-RecommendationsPS7
-        PerformanceMetrics = if ($IncludePerformance) { Get-PerformanceMetricsPS7 } else { $null }
-        GenerationTime = $null
+
+    Write-DebugLog 'Collecting PS7 status data' DEBUG @{
+        ComputerName    = $ComputerName
+        IncludePerf     = $IncludePerformance.IsPresent
+        QwinstaEnLoaded = [bool](Get-Command -Name 'Get-WtsSessionsEn' -ErrorAction SilentlyContinue)
     }
-    
-    $statusData.GenerationTime = ((Get-Date) - $statusStartTime).TotalMilliseconds
-    
-    return $statusData
+
+    # -- OS Version ---------------------------------------------------------
+    $osVersion = try {
+        Get-OSVersionInfoPS7
+    }
+    catch {
+        Write-DebugLog 'Get-OSVersionInfoPS7 failed' ERROR @{ Error = $_.Exception.Message }
+        [PSCustomObject]@{ Error = $_.Exception.Message; Version = 'Unknown' }
+    }
+
+    # -- RDP Configuration --------------------------------------------------
+    $rdpConfig = try {
+        Get-RDPConfigurationPS7
+    }
+    catch {
+        Write-DebugLog 'Get-RDPConfigurationPS7 failed' ERROR @{ Error = $_.Exception.Message }
+        [PSCustomObject]@{ Error = $_.Exception.Message }
+    }
+
+    # -- Shadow Configuration -----------------------------------------------
+    $shadowConfig = try {
+        Get-ShadowConfigurationPS7
+    }
+    catch {
+        Write-DebugLog 'Get-ShadowConfigurationPS7 failed' ERROR @{ Error = $_.Exception.Message }
+        [PSCustomObject]@{ Error = $_.Exception.Message }
+    }
+
+    # -- Firewall -----------------------------------------------------------
+    $firewallStatus = try {
+        Get-FirewallStatusPS7
+    }
+    catch {
+        Write-DebugLog 'Get-FirewallStatusPS7 failed' ERROR @{ Error = $_.Exception.Message }
+        [PSCustomObject]@{ Error = $_.Exception.Message }
+    }
+
+    # -- Services -----------------------------------------------------------
+    $serviceStatus = try {
+        Get-ServiceStatusPS7
+    }
+    catch {
+        Write-DebugLog 'Get-ServiceStatusPS7 failed' ERROR @{ Error = $_.Exception.Message }
+        @()
+    }
+
+    # -- Active Sessions (qwinsta-en.ps1 preferred, legacy fallback) --------
+    $activeSessions = try {
+        if (Get-Command -Name 'Get-WtsSessionsEn' -ErrorAction SilentlyContinue) {
+            Write-DebugLog 'Active Sessions: using qwinsta-en.ps1 engine' DEBUG @{
+                ComputerName = $ComputerName
+            }
+            # Get-ActiveSessionsPS7 is defined in qwinsta-en.ps1
+            Get-ActiveSessionsPS7 -ComputerName $ComputerName
+        }
+        else {
+            Write-DebugLog 'Active Sessions: qwinsta-en.ps1 unavailable, using legacy' DEBUG @{
+                ComputerName = $ComputerName
+            }
+            # Legacy path — original implementation inside this script
+            $allSessions   = @(Get-RDPSessions -ComputerName $ComputerName)
+            $display       = @($allSessions | Where-Object { Test-RdpDisplaySession -Session $_ })
+            $active        = @($display | Where-Object { (Get-SessionStateName -Session $_) -eq 'Active' })
+            $disc          = @($display | Where-Object { (Get-SessionStateName -Session $_) -eq 'Disconnected' })
+            $currentSess   = $display | Where-Object { $_.IsCurrent } | Select-Object -First 1
+
+            [PSCustomObject]@{
+                TotalSessions        = $display.Count
+                ActiveSessions       = $active.Count
+                DisconnectedSessions = $disc.Count
+                SessionDetails       = @($display | Sort-Object SessionId |
+                    Select-Object SessionId, UserName, State, SessionName, IsCurrent, Type)
+                CurrentSession       = $currentSess
+                Source               = 'legacy/Get-RDPSessions'
+            }
+        }
+    }
+    catch {
+        Write-DebugLog 'Active Sessions collection failed' ERROR @{
+            Error      = $_.Exception.Message
+            StackTrace = $_.ScriptStackTrace
+        }
+        [PSCustomObject]@{
+            Error                = $_.Exception.Message
+            TotalSessions        = 0
+            ActiveSessions       = 0
+            DisconnectedSessions = 0
+            SessionDetails       = @()
+            CurrentSession       = $null
+            Source               = 'error'
+        }
+    }
+
+    Write-DebugLog 'Active Sessions result' DEBUG @{
+        Total        = $activeSessions.TotalSessions
+        Active       = $activeSessions.ActiveSessions
+        Disconnected = $activeSessions.DisconnectedSessions
+        Source       = $activeSessions.Source
+        Current      = if ($null -ne $activeSessions.CurrentSession) {
+            "ID=$($activeSessions.CurrentSession.SessionId) User=$($activeSessions.CurrentSession.UserName)"
+        } else { 'None' }
+    }
+
+    # -- Recommendations ----------------------------------------------------
+    $recommendations = try {
+        Get-RecommendationsPS7
+    }
+    catch {
+        Write-DebugLog 'Get-RecommendationsPS7 failed' ERROR @{ Error = $_.Exception.Message }
+        @()
+    }
+
+    # -- Performance (optional) ---------------------------------------------
+    $perfMetrics = $null
+    if ($IncludePerformance) {
+        $perfMetrics = try {
+            Get-PerformanceMetricsPS7
+        }
+        catch {
+            Write-DebugLog 'Get-PerformanceMetricsPS7 failed' ERROR @{ Error = $_.Exception.Message }
+            [PSCustomObject]@{ Error = $_.Exception.Message }
+        }
+    }
+
+    $elapsed = ((Get-Date) - $statusStartTime).TotalMilliseconds
+
+    Write-DebugLog 'PS7 status data collection complete' DEBUG @{
+        ElapsedMs    = [math]::Round($elapsed, 1)
+        ComputerName = $ComputerName
+    }
+
+    return [PSCustomObject]@{
+        IsAdministrator    = Test-IsAdministrator
+        OSVersion          = $osVersion
+        RDPConfiguration   = $rdpConfig
+        ShadowConfiguration = $shadowConfig
+        FirewallStatus     = $firewallStatus
+        ServiceStatus      = $serviceStatus
+        ActiveSessions     = $activeSessions
+        Recommendations    = $recommendations
+        PerformanceMetrics = $perfMetrics
+        GenerationTime     = $elapsed
+    }
 }
 
 function Get-OSVersionInfoPS7 {
@@ -4703,47 +5332,32 @@ function Get-OSVersionInfoPS7 {
 }
 
 function Get-RDPConfigurationPS7 {
-    try {
-        # Use parallel registry queries for performance
-        $tasks = @(
-            @{ Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"; Name = "fDenyTSConnections" }
-            @{ Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"; Name = "MaxInstanceCount" }
-            @{ Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"; Name = "KeepAliveInterval" }
-            @{ Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"; Name = "AllowRemoteRPC" }
-        )
-        
-        $results = $tasks | ForEach-Object -Parallel {
-            try {
-                $value = Get-ItemProperty -Path $_.Path -Name $_.Name -ErrorAction SilentlyContinue
-                @{
-                    Name = $_.Name
-                    Value = if ($value) { $value.$($_.Name) } else { $null }
-                }
-            } catch {
-                @{ Name = $_.Name; Error = $_.Exception.Message }
-            }
-        } -ThrottleLimit 4
-        
-        $config = @{}
-        foreach ($result in $results) {
-            $config[$result.Name] = $result.Value
-        }
-        
-        $config.RDPEnabled = if ($config.fDenyTSConnections -ne $null) { $config.fDenyTSConnections -eq 0 } else { $null }
-        
-        return $config
-        
-    } catch {
-        return @{ Error = $_.Exception.Message }
+[CmdletBinding()]
+param()
+try {
+    $regPath   = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"
+    $props     = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
+    $propNames = if ($props) { $props.PSObject.Properties.Name } else { @() }
+
+    return [PSCustomObject]@{
+        RDPEnabled        = if ($propNames -contains 'fDenyTSConnections') { [bool]($props.fDenyTSConnections -eq 0) } else { $null }
+        MaxInstanceCount  = if ($propNames -contains 'MaxInstanceCount')  { $props.MaxInstanceCount  } else { $null }
+        KeepAliveInterval = if ($propNames -contains 'KeepAliveInterval') { $props.KeepAliveInterval } else { $null }
+        AllowRemoteRPC    = if ($propNames -contains 'AllowRemoteRPC')    { $props.AllowRemoteRPC    } else { $null }
     }
+}
+catch {
+    return [PSCustomObject]@{
+        Error             = $_.Exception.Message
+        RDPEnabled        = $null
+        MaxInstanceCount  = $null
+        KeepAliveInterval = $null
+        AllowRemoteRPC    = $null
+    }
+}
 }
 
 function Get-ShadowConfigurationPS7 {
-    <#
-    Author: Mikhail Deynekin
-    Website: https://deynekin.com
-    Email: mid1977@gmail.com
-    #>
     [CmdletBinding()]
     param()
 
@@ -4837,97 +5451,233 @@ function Get-ShadowConfigurationPS7 {
 }
 
 function Get-FirewallStatusPS7 {
+    # Author  : Mikhail Deynekin
+    # Website : https://deynekin.com
+    # Email   : mid1977@gmail.com
+    [CmdletBinding()]
+    param()
+
     try {
-        # Use Get-NetFirewallRule for better performance in PS7
-        $rules = Get-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-        
-        $status = @{
-            RDPRuleCount = ($rules | Measure-Object).Count
+        $status = [ordered]@{
+            RDPRuleCount         = 0
             RDPEnabledInFirewall = $false
-            FirewallEnabled = $null
+            FirewallEnabled      = $null
         }
-        
-        if ($rules) {
-            $enabledRules = $rules | Where-Object { $_.Enabled -eq $true }
-            $status.RDPEnabledInFirewall = ($enabledRules | Measure-Object).Count -gt 0
+
+        try {
+            $profiles = Get-NetFirewallProfile -ErrorAction SilentlyContinue
+            if ($profiles) {
+                $status.FirewallEnabled = (($profiles | Where-Object Enabled -eq True).Count -gt 0)
+            }
         }
-        
-        # Check firewall profiles
-        $profiles = Get-NetFirewallProfile -ErrorAction SilentlyContinue
-        if ($profiles) {
-            $status.FirewallEnabled = ($profiles | Where-Object { $_.Enabled -eq 'True' } | Measure-Object).Count -gt 0
+        catch {}
+
+        $rules = @()
+
+        try {
+            $rules += @(Get-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue)
+            $rules += @(Get-NetFirewallRule -DisplayGroup 'Удаленный рабочий стол' -ErrorAction SilentlyContinue)
         }
-        
-        return $status
-        
-    } catch {
-        # Fallback to netsh if Get-NetFirewallRule fails
-        return Get-FirewallStatusPS5
+        catch {}
+
+        if (-not $rules -or $rules.Count -eq 0) {
+            try {
+                $rules += @(Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object {
+                    $_.DisplayName -match 'Remote Desktop|Удаленный рабочий стол|RDP|3389'
+                })
+            }
+            catch {}
+        }
+
+        $rules = @($rules | Where-Object { $_ } | Sort-Object Name -Unique)
+
+        if ($rules.Count -gt 0) {
+            $status.RDPRuleCount = $rules.Count
+
+            $enabledRules = @($rules | Where-Object Enabled -eq True)
+            if ($enabledRules.Count -gt 0) {
+                $status.RDPEnabledInFirewall = $true
+            }
+
+            if (-not $status.RDPEnabledInFirewall) {
+                foreach ($rule in $rules) {
+                    try {
+                        $pf = @(Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue)
+                        foreach ($p in $pf) {
+                            if ($p.LocalPort -eq '3389' -or $p.LocalPort -match '(^|,)3389(,|$)') {
+                                if ($rule.Enabled -eq 'True' -or $rule.Enabled -eq $true) {
+                                    $status.RDPEnabledInFirewall = $true
+                                    break
+                                }
+                            }
+                        }
+                        if ($status.RDPEnabledInFirewall) { break }
+                    }
+                    catch {}
+                }
+            }
+        }
+
+        if ($status.RDPRuleCount -eq 0 -or -not $status.RDPEnabledInFirewall) {
+            try {
+                $netshOutput = netsh advfirewall firewall show rule name=all | Out-String
+                if ($netshOutput) {
+                    $blocks = ($netshOutput -split '(?m)^Rule Name: ' | Where-Object { $_ -match 'Remote Desktop|Удаленный рабочий стол|3389|RDP' })
+                    if ($blocks.Count -gt $status.RDPRuleCount) {
+                        $status.RDPRuleCount = $blocks.Count
+                    }
+
+                    foreach ($block in $blocks) {
+                        if ($block -match '(?im)^Enabled:\s*Yes\s*$') {
+                            $status.RDPEnabledInFirewall = $true
+                            break
+                        }
+                    }
+                }
+            }
+            catch {}
+        }
+
+        return [PSCustomObject]$status
+    }
+    catch {
+        return [PSCustomObject]@{
+            Error                = $_.Exception.Message
+            RDPRuleCount         = 0
+            RDPEnabledInFirewall = $false
+            FirewallEnabled      = $null
+        }
     }
 }
 
+# ==============================================================================
+# Purpose :
+#   1. Fix Active Sessions = 0 on Windows 10/11 console sessions
+#   2. Remove status-line truncation/ellipsis in Service Status grid
+#   3. Improve Firewall Status detection for RDP rule count and allowed state
+# ==============================================================================
+
 function Get-ServiceStatusPS7 {
-    $services = @()
-    
+    [CmdletBinding()]
+    param()
+
+    $services = [System.Collections.Generic.List[PSCustomObject]]::new()
+
     $serviceNames = @(
-        @{ Name = "TermService"; DisplayName = "RD Services" } #Remote Desktop Services
-        @{ Name = "SessionEnv"; DisplayName = "RD Configuration" } #Remote Desktop Configuration
-        @{ Name = "UmRdpService"; DisplayName = "UserMode Port Redirector" } #Remote Desktop Services UserMode Port Redirector
-        @{ Name = "WinRM"; DisplayName = "Remote Management" } #Windows Remote Management
-        @{ Name = "Spooler"; DisplayName = "Print Spooler" }
+        @{ Name = 'TermService';  DisplayName = 'Remote Desktop Services';                             GridName = 'RD Services' },
+        @{ Name = 'SessionEnv';   DisplayName = 'Remote Desktop Configuration';                        GridName = 'RD Configuration' },
+        @{ Name = 'UmRdpService'; DisplayName = 'Remote Desktop Services UserMode Port Redirector';    GridName = 'UserMode Port Redirector' },
+        @{ Name = 'WinRM';        DisplayName = 'Windows Remote Management';                           GridName = 'Remote Management' },
+        @{ Name = 'Spooler';      DisplayName = 'Print Spooler';                                       GridName = 'Print Spooler' }
     )
-    
-    # Use standard loop for PowerShell 5.1 compatibility
+
     foreach ($svc in $serviceNames) {
         try {
             $service = Get-Service -Name $svc.Name -ErrorAction SilentlyContinue
-            
             if ($service) {
-                $services += [PSCustomObject]@{
-                    Name = $svc.Name
+                $services.Add([PSCustomObject]@{
+                    Name        = $svc.Name
                     DisplayName = $svc.DisplayName
-                    Status = $service.Status
+                    GridName    = $svc.GridName
+                    Status      = [string]$service.Status
                     StartupType = $service.StartType
-                    CanStart = ($service.Status -ne "Running") -and ($service.StartType -ne "Disabled")
-                    CanStop = $service.Status -eq "Running"
-                }
-            } else {
-                $services += [PSCustomObject]@{
-                    Name = $svc.Name
-                    DisplayName = $svc.DisplayName
-                    Status = "Not Found"
-                    StartupType = "N/A"
-                    CanStart = $false
-                    CanStop = $false
-                }
+                    CanStart    = ($service.Status -ne 'Running') -and ($service.StartType -ne 'Disabled')
+                    CanStop     = ($service.Status -eq 'Running')
+                })
             }
-        } catch {
-            $services += [PSCustomObject]@{
-                Name = $svc.Name
-                DisplayName = $svc.DisplayName
-                Status = "Error"
-                Error = $_.Exception.Message
+            else {
+                $services.Add([PSCustomObject]@{
+                    Name        = $svc.Name
+                    DisplayName = $svc.DisplayName
+                    GridName    = $svc.GridName
+                    Status      = 'Not Found'
+                    StartupType = 'NA'
+                    CanStart    = $false
+                    CanStop     = $false
+                })
             }
         }
+        catch {
+            $services.Add([PSCustomObject]@{
+                Name        = $svc.Name
+                DisplayName = $svc.DisplayName
+                GridName    = $svc.GridName
+                Status      = 'Error'
+                Error       = $_.Exception.Message
+                StartupType = 'NA'
+                CanStart    = $false
+                CanStop     = $false
+            })
+        }
     }
-    
-    return $services
+
+    return $services.ToArray()
 }
 
 function Get-ActiveSessionsPS7 {
+    <#
+    .SYNOPSIS
+        Builds normalized session statistics using qwinsta-en.ps1 engine.
+
+    .NOTES
+        Function Version: 2.1.0
+        Requires: qwinsta-en.ps1 dot-sourced before this point (provides Get-WtsSessionsEn).
+    #>
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [string]$ComputerName = $env:COMPUTERNAME
+    )
+
     try {
-        $allSessions = Get-RDPSessions
-        $activeSessions = $allSessions | Where-Object { $_.State -eq "Active" }
-        
-        return [PSCustomObject]@{
-            TotalSessions = $allSessions.Count
-            ActiveSessions = $activeSessions.Count
-            DisconnectedSessions = $allSessions.Count - $activeSessions.Count
-            SessionDetails = $activeSessions | Select-Object SessionId, UserName, State, SessionName, IsCurrent
-            CurrentSession = $activeSessions | Where-Object { $_.IsCurrent } | Select-Object -First 1
+        $allSessions = @(Get-WtsSessionsEn -ComputerName $ComputerName -IncludeSystem)
+
+        Write-DebugLog 'Raw sessions from Get-WtsSessionsEn' DEBUG @{
+            Count   = $allSessions.Count
+            Preview = ($allSessions | ForEach-Object {
+                "ID=$($_.SessionId) Name=$($_.SessionName) User=$($_.UserName) State=$($_.State) Sys=$($_.IsSystem) Cur=$($_.IsCurrent)"
+            }) -join ' || '
         }
-    } catch {
-        return @{ Error = $_.Exception.Message }
+
+        $display = @($allSessions | Where-Object { -not $_.IsSystem })
+        $active  = @($display    | Where-Object { $_.State -in @('Active', 'Connected') })
+        $disc    = @($display    | Where-Object { $_.State -eq 'Disconnected' })
+        $current = $display      | Where-Object { $_.IsCurrent } | Select-Object -First 1
+
+        Write-DebugLog 'Active Sessions counters ready' DEBUG @{
+            Total        = $display.Count
+            Active       = $active.Count
+            Disconnected = $disc.Count
+            Current      = if ($null -ne $current) {
+                "ID=$($current.SessionId) User=$($current.UserName)"
+            } else { 'None' }
+        }
+
+        return [PSCustomObject]@{
+            TotalSessions        = $display.Count
+            ActiveSessions       = $active.Count
+            DisconnectedSessions = $disc.Count
+            SessionDetails       = @($display | Sort-Object SessionId |
+                Select-Object SessionId, UserName, State, SessionName, Type, IsCurrent, Domain, ClientName)
+            CurrentSession       = $current
+            Source               = 'qwinsta-en.ps1'
+        }
+    }
+    catch {
+        Write-DebugLog 'Error in Get-ActiveSessionsPS7' ERROR @{
+            Error      = $_.Exception.Message
+            StackTrace = $_.ScriptStackTrace
+        }
+
+        return [PSCustomObject]@{
+            Error                = $_.Exception.Message
+            TotalSessions        = 0
+            ActiveSessions       = 0
+            DisconnectedSessions = 0
+            SessionDetails       = @()
+            CurrentSession       = $null
+            Source               = 'error'
+        }
     }
 }
 
@@ -4964,9 +5714,10 @@ function Get-RecommendationsPS7 {
                     }
                 }
                 "RDP" {
-                    if (-not $result.Result.RDPEnabled) {
-                        $recommendations.Add("RDP is disabled. Enable it for remote access.")
-                    }
+    $isEnabled = $null -ne $result.Result.PSObject.Properties['RDPEnabled'] -and $result.Result.RDPEnabled
+    if (-not $isEnabled) {
+        $recommendations.Add("RDP is disabled or not configured. Enable it for remote access.")
+    }
                 }
                 "Firewall" {
                     if (-not $result.Result.RDPEnabledInFirewall) {
@@ -5069,13 +5820,7 @@ function Show-StatusReportPS7 {
     }
 
     # -- Recommendations (safe array) ------------------------------------------
-    [string[]]$safeRecs = if ($StatusData.Recommendations -is [array]) {
-        $StatusData.Recommendations
-    } elseif ($StatusData.Recommendations) {
-        @($StatusData.Recommendations)
-    } else {
-        @()
-    }
+$safeRecs = @(if ($StatusData.Recommendations) { $StatusData.Recommendations } else { @() })
 
     # -- Helper: print a grid row with two colored cells -----------------------
     # line1 / line2 must already be exactly $W visible chars (from Format-SectionDataPS7)
@@ -5136,23 +5881,19 @@ function Show-StatusReportPS7 {
         Write-Host "$($C.Header)|$R $($C.Info)$t1$R $($C.Header)|$R $($C.Info)$t2$R $($C.Header)|$R"
         Write-Host "$($C.Header)$hLine$R"
 
-        # Data rows
-        [string[]]$lines1 = Format-SectionDataPS7 -Section $sec1 -Color $C
-        [string[]]$lines2 = if ($sec2) {
-            Format-SectionDataPS7 -Section $sec2 -Color $C
-        } else {
-            @((' ' * $W), (' ' * $W), (' ' * $W), (' ' * $W))
-        }
-
-        $rowCount = [Math]::Max($lines1.Count, $lines2.Count)
-        for ($j = 0; $j -lt $rowCount; $j++) {
-            $l1 = if ($j -lt $lines1.Count) { $lines1[$j] } else { ' ' * $W }
-            $l2 = if ($j -lt $lines2.Count) { $lines2[$j] } else { ' ' * $W }
-            & $printRow $l1 $l2
-        }
-
-        Write-Host "$($C.Header)$hLine$R"
-    }
+	# Data rows
+	[string[]]$lines1 = @(Format-SectionDataPS7 -Section $sec1 -Color $C)
+	[string[]]$lines2 = @(if ($sec2) { Format-SectionDataPS7 -Section $sec2 -Color $C } else { ' ' * $W; ' ' * $W; ' ' * $W; ' ' * $W })
+	$rowCount = [Math]::Max(@($lines1).Count, @($lines2).Count)
+	for ($j = 0; $j -lt $rowCount; $j++) {
+	    $l1 = if ($j -lt @($lines1).Count) { $lines1[$j] } else { ' ' * $W }
+	    $l2 = if ($j -lt @($lines2).Count) { $lines2[$j] } else { ' ' * $W }
+    
+	    # ✅ CRITICAL FIX: Output the formatted row to the console
+	    & $printRow -l1 $l1 -l2 $l2
+	}
+	Write-Host "$($C.Header)$hLine$R"
+}
 
     # -------------------------------------------------------------------------
     # PERFORMANCE METRICS (optional)
@@ -5197,7 +5938,7 @@ function Show-StatusReportPS7 {
     Write-Host "$($C.Header)|$R$($C.Info)$recTitlePd$R$($C.Header)|$R"
     Write-Host "$($C.Header)$hTitle$R"
 
-    if ($safeRecs.Count -eq 0) {
+    if (@($safeRecs).Count -eq 0) {
         Write-Host "   $($C.Success)[OK] No issues detected. System is properly configured.$R"
     } else {
         foreach ($rec in $safeRecs) {
@@ -5293,190 +6034,172 @@ function Format-CellPair {
 # Each string is ready to drop directly into the two-column grid renderer.
 # -----------------------------------------------------------------------------
 function Format-SectionDataPS7 {
+    <#
+    .SYNOPSIS
+        Renders one grid section into exactly 4 fixed-width strings.
+
+    .NOTES
+        Function Version: 2.1.0
+        StrictMode-safe: all PSCustomObject property accesses use PSObject.Properties guard.
+    #>
     [OutputType([string[]])]
     param(
         [Parameter(Mandatory)] $Section,
-        [Parameter(Mandatory)] $Color    # hashtable: Header/Success/Warning/Error/Info/Debug/Reset
+        [Parameter(Mandatory)] [hashtable] $Color
     )
 
-    # Column width ? must match the +----...----+ border in Show-StatusReportPS7
-    $W  = 34
-    $C  = $Color
-    $R  = $C.Reset
-
+    $W = 34
+    $C = $Color
+    $R = $C.Reset
     $lines = [System.Collections.Generic.List[string]]::new()
     $data  = $Section.Data
 
-    # -- Inline helpers scoped to this call -----------------------------------
+    # StrictMode-safe error check — works even when $data has no 'Error' property
+    $hasError = (
+        $null -ne $data -and
+        $null -ne $data.PSObject.Properties['Error'] -and
+        -not [string]::IsNullOrWhiteSpace($data.Error)
+    )
 
-    # Safe string: converts $null / DBNull to a displayable string
-    $safe = { param($v, $fallback = 'N/A')
-        if ($null -eq $v -or $v -is [System.DBNull]) { $fallback } else { "$v" }
+    $errLine = if ($hasError) {
+        Format-Cell -Text "ERR: $($data.Error)" -ColorCode $C.Error -ResetCode $R -Width $W -TruncateWithEllipsis
+    } else {
+        Format-Cell -Width $W
     }
-
-    # Error line: full-width red error message
-    $errLine = {
-        Format-Cell -Text "ERR: $($data.Error)" -ColorCode $C.Error `
-                    -ResetCode $R -Width $W -TruncateWithEllipsis
-    }
-
-    # -- Section renderers -----------------------------------------------------
 
     switch ($Section.Title) {
 
-        #----------------------------------------------------------------------
-        'Windows Version' {
-            if ($data.Error) {
-                $lines.Add((& $errLine))
-            } else {
-                $arch = (& $safe $data.Architecture)
-                # Shorten "64-ПЮГПЪДМЮЪ" > "64-bit" etc. for column fit
-                $arch = $arch -replace '64-ПЮГПЪДМЮЪ','64-bit' `
-                              -replace '32-ПЮГПЪДМЮЪ','32-bit'
+        # ------------------------------------------------------------------
+'Windows Version' {
+    if ($hasError) { $lines.Add($errLine) }
+    else {
+        $archRaw = safe $data.Architecture
+        $arch    = if ($archRaw -match '64') { '64-bit' } elseif ($archRaw -match '32') { '32-bit' } else { $archRaw }
+        $lines.Add((Format-CellPair 'Ver'    (safe $data.Version)     $C.Debug $C.Debug $R $W))
+        $lines.Add((Format-CellPair 'Build'  (safe $data.BuildNumber) $C.Debug $C.Debug $R $W))
+        $lines.Add((Format-CellPair 'Arch'   $arch                    $C.Debug $C.Debug $R $W))
+        $lines.Add((Format-CellPair 'Server' (safe $data.IsServer)    $C.Debug $C.Debug $R $W))
+    }
+}
+        # ------------------------------------------------------------------
+'RDP Configuration' {
+    if ($hasError) { $lines.Add($errLine) }
+    else {
+        $rdpEnabled = $null -ne $data.PSObject.Properties['RDPEnabled'] -and $data.RDPEnabled
+        $rdpText    = if ($rdpEnabled) { 'Enabled' }  else { 'Disabled' }
+        $rdpColor   = if ($rdpEnabled) { $C.Success } else { $C.Error }
+        $lines.Add((Format-CellPair 'Status'    $rdpText                          $C.Debug $rdpColor $R $W))
+        $lines.Add((Format-CellPair 'MaxSess'   (safe $data.MaxInstanceCount)     $C.Debug $C.Debug  $R $W))
+        $lines.Add((Format-CellPair 'KeepAlive' (safe $data.KeepAliveInterval)    $C.Debug $C.Debug  $R $W))
+        $lines.Add((Format-CellPair 'RemoteRPC' (safe $data.AllowRemoteRPC)       $C.Debug $C.Debug  $R $W))
+    }
+}
 
-                $lines.Add((Format-CellPair 'Ver'    (& $safe $data.Version)     $C.Debug $C.Debug $R $W))
-                $lines.Add((Format-CellPair 'Build'  (& $safe $data.BuildNumber) $C.Debug $C.Debug $R $W))
-                $lines.Add((Format-CellPair 'Arch'   $arch                       $C.Debug $C.Debug $R $W))
-                $lines.Add((Format-CellPair 'Server' (& $safe $data.IsServer)    $C.Debug $C.Debug $R $W))
-            }
-        }
-
-        #----------------------------------------------------------------------
-        'RDP Configuration' {
-            if ($data.Error) {
-                $lines.Add((& $errLine))
-            } else {
-                $rdpEnabled = $data.RDPEnabled
-                $rdpText    = if ($rdpEnabled) { 'Enabled'  } else { 'Disabled' }
-                $rdpColor   = if ($rdpEnabled) { $C.Success } else { $C.Error   }
-
-                $maxVal  = & $safe $data.MaxInstanceCount
-                $kaVal   = & $safe $data.KeepAliveInterval
-                $rpcVal  = & $safe $data.AllowRemoteRPC
-
-                $lines.Add((Format-CellPair 'Status'    $rdpText $C.Debug $rdpColor $R $W))
-                $lines.Add((Format-CellPair 'MaxSess'   $maxVal  $C.Debug $C.Debug  $R $W))
-                $lines.Add((Format-CellPair 'KeepAlive' $kaVal   $C.Debug $C.Debug  $R $W))
-                $lines.Add((Format-CellPair 'RemoteRPC' $rpcVal  $C.Debug $C.Debug  $R $W))
-            }
-        }
-
-        #----------------------------------------------------------------------
+        # ------------------------------------------------------------------
         'Shadow Configuration' {
-            if ($data.Error) {
-                $lines.Add((& $errLine))
-            } else {
-                $mode      = $data.ShadowMode
-                $modeDesc  = & $safe $data.ShadowModeDescription 'Not Configured'
-                $modeColor = if ($null -ne $mode -and $mode -ge 2) { $C.Success } else { $C.Warning }
-                $legacy    = & $safe $data.LegacyShadowMode ''
-
-                $lines.Add((Format-CellPair 'Mode'   $modeDesc $C.Debug $modeColor $R $W))
-                $lines.Add((Format-CellPair 'Value'  (& $safe $mode)   $C.Debug $C.Debug $R $W))
-
-                if ($legacy -ne '') {
-                    $lines.Add((Format-CellPair 'Legacy' $legacy $C.Debug $C.Debug $R $W))
+            if ($hasError) { $lines.Add($errLine) }
+            else {
+                $mode      = if ($null -ne $data.PSObject.Properties['ShadowMode'])            { $data.ShadowMode }            else { $null }
+                $modeDesc  = if ($null -ne $data.PSObject.Properties['ShadowModeDescription']) { $data.ShadowModeDescription } else { 'Not Configured' }
+                $legacy    = if ($null -ne $data.PSObject.Properties['LegacyShadowMode'])      { $data.LegacyShadowMode }      else { $null }
+                $modeColor = if ($null -ne $mode -and [int]$mode -ge 2) { $C.Success } else { $C.Warning }
+                $lines.Add((Format-CellPair 'Mode'   (safe $modeDesc 'Not Configured') $C.Debug $modeColor $R $W))
+                $lines.Add((Format-CellPair 'Value'  (safe $mode)                      $C.Debug $C.Debug   $R $W))
+                if ($null -ne $legacy) {
+                    $lines.Add((Format-CellPair 'Legacy' (safe $legacy) $C.Debug $C.Debug $R $W))
                 } else {
-                    $lines.Add((Format-Cell '' -Width $W))
+                    $lines.Add((Format-Cell -Width $W))
                 }
+                $lines.Add((Format-Cell -Width $W))
             }
         }
 
-        #----------------------------------------------------------------------
+        # ------------------------------------------------------------------
         'Firewall Status' {
-            if ($data.Error) {
-                $lines.Add((& $errLine))
-            } else {
-                $fwEnabled  = $data.FirewallEnabled
-                $rdpAllow   = $data.RDPEnabledInFirewall
-                $ruleCount  = & $safe $data.RDPRuleCount '0'
-
-                $fwText     = if ($fwEnabled) { 'Enabled'  } else { 'Disabled' }
-                $fwColor    = if ($fwEnabled) { $C.Success } else { $C.Warning  }
-                $rdpText    = if ($rdpAllow)  { 'Allowed'  } else { 'Blocked'  }
-                $rdpColor   = if ($rdpAllow)  { $C.Success } else { $C.Error   }
-
+            if ($hasError) { $lines.Add($errLine) }
+            else {
+                $fwEnabled = $null -ne $data.PSObject.Properties['FirewallEnabled']    -and $data.FirewallEnabled
+                $rdpAllow  = $null -ne $data.PSObject.Properties['RDPEnabledInFirewall'] -and $data.RDPEnabledInFirewall
+                $ruleCount = if ($null -ne $data.PSObject.Properties['RDPRuleCount'])  { $data.RDPRuleCount } else { 0 }
+                $fwText    = if ($fwEnabled) { 'Enabled' }  else { 'Disabled' }
+                $fwColor   = if ($fwEnabled) { $C.Success } else { $C.Warning }
+                $rdpText   = if ($rdpAllow)  { 'Allowed' }  else { 'Blocked' }
+                $rdpColor  = if ($rdpAllow)  { $C.Success } else { $C.Error }
                 $lines.Add((Format-CellPair 'Firewall' $fwText    $C.Debug $fwColor  $R $W))
                 $lines.Add((Format-CellPair 'RDP'      $rdpText   $C.Debug $rdpColor $R $W))
                 $lines.Add((Format-CellPair 'Rules'    $ruleCount $C.Debug $C.Debug  $R $W))
+                $lines.Add((Format-Cell -Width $W))
             }
         }
 
-        #----------------------------------------------------------------------
+        # ------------------------------------------------------------------
         'Service Status' {
             $services = @($data | Select-Object -First 4)
-
             foreach ($svc in $services) {
-                $statusText  = & $safe $svc.Status 'Unknown'
+                $statusText  = safe $svc.Status 'Unknown'
                 $statusColor = switch ($statusText) {
                     'Running'   { $C.Success }
                     'Stopped'   { $C.Error   }
                     'Not Found' { $C.Warning }
                     default     { $C.Warning }
                 }
+                # Prefer GridName (short alias) → DisplayName → Name
+                $displayName = if ($null -ne $svc.PSObject.Properties['GridName']   -and -not [string]::IsNullOrWhiteSpace($svc.GridName))   { $svc.GridName }
+                               elseif ($null -ne $svc.PSObject.Properties['DisplayName'] -and -not [string]::IsNullOrWhiteSpace($svc.DisplayName)) { $svc.DisplayName }
+                               else { safe $svc.Name 'Unknown' }
 
-                # Shorten display name to leave room for status (9 chars)
-                $maxNameLen  = $W - 11    # "Name: " prefix + status field
-                $displayName = & $safe $svc.DisplayName $svc.Name
+                # maxNameLen = W - status length - 1 space
+                $maxNameLen = $W - $statusText.Length - 1
                 if ($displayName.Length -gt $maxNameLen) {
                     $displayName = $displayName.Substring(0, $maxNameLen - 3) + '...'
                 }
-
-                $raw    = "$displayName $statusText"
-                $padded = $raw.PadRight($W)
+                $raw     = "$displayName $statusText"
+                $padded  = $raw.PadRight($W)
                 if ($padded.Length -gt $W) { $padded = $padded.Substring(0, $W - 3) + '...' }
-
-                # Color only the status part
                 $splitAt = $padded.LastIndexOf($statusText)
                 if ($splitAt -gt 0) {
                     $namePart   = $padded.Substring(0, $splitAt)
                     $statusPart = $padded.Substring($splitAt)
-                    $lines.Add("${C.Debug}${namePart}${statusColor}${statusPart}${R}")
+                    $lines.Add("$($C.Debug)$namePart$statusColor$statusPart$R")
                 } else {
                     $lines.Add((Format-Cell $raw -ColorCode $C.Debug -ResetCode $R -Width $W))
                 }
             }
         }
 
-        #----------------------------------------------------------------------
+        # ------------------------------------------------------------------
         'Active Sessions' {
-            if ($data.Error) {
-                $lines.Add((& $errLine))
-            } else {
-                $total  = & $safe $data.TotalSessions        '0'
-                $active = & $safe $data.ActiveSessions       '0'
-                $disc   = & $safe $data.DisconnectedSessions '0'
-
+            if ($hasError) { $lines.Add($errLine) }
+            else {
+                $total  = safe $data.TotalSessions        '0'
+                $active = safe $data.ActiveSessions       '0'
+                $disc   = safe $data.DisconnectedSessions '0'
                 $activeColor = if ([int]$active -gt 0) { $C.Success } else { $C.Debug }
-
                 $lines.Add((Format-CellPair 'Total'  $total  $C.Debug $C.Debug     $R $W))
                 $lines.Add((Format-CellPair 'Active' $active $C.Debug $activeColor $R $W))
                 $lines.Add((Format-CellPair 'Disc'   $disc   $C.Debug $C.Debug     $R $W))
-
-                if ($data.CurrentSession) {
-                    $curId   = & $safe $data.CurrentSession.SessionId '?'
-                    $curUser = & $safe $data.CurrentSession.UserName   ''
-                    $curText = if ($curUser) { "ID $curId ($curUser)" } else { "ID $curId" }
+                $cur = if ($null -ne $data.PSObject.Properties['CurrentSession']) { $data.CurrentSession } else { $null }
+                if ($null -ne $cur) {
+                    $curId   = safe $cur.SessionId '?'
+                    $curUser = safe $cur.UserName  ''
+                    $curText = if ($curUser) { "ID $curId $curUser" } else { "ID $curId" }
                     $lines.Add((Format-CellPair 'Current' $curText $C.Debug $C.Success $R $W))
+                } else {
+                    $lines.Add((Format-Cell -Width $W))
                 }
             }
         }
 
-        #----------------------------------------------------------------------
+        # ------------------------------------------------------------------
         default {
             $lines.Add((Format-Cell "Unknown section: $($Section.Title)" `
-                        -ColorCode $C.Warning -ResetCode $R -Width $W `
-                        -TruncateWithEllipsis))
+                -ColorCode $C.Warning -ResetCode $R -Width $W -TruncateWithEllipsis))
         }
     }
 
-    # -- Pad to exactly 4 lines ? grid renderer expects a fixed row count ------
-    while ($lines.Count -lt 4) {
-        $lines.Add((Format-Cell '' -Width $W))
-    }
-
-    # Return exactly 4 elements
-    return [string[]]$lines[0..3]
+    # Pad to exactly 4 rows — grid renderer requires a fixed row count
+    while ($lines.Count -lt 4) { $lines.Add((Format-Cell -Width $W)) }
+    return [string[]]@($lines[0..3])
 }
 
 function Format-PercentageBar {
