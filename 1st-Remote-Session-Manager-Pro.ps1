@@ -14,7 +14,7 @@
     GitHub: https://github.com/paulmann/1st-Remote-Session-Manager-Pro
 
 .AUTHOR
-    Mikhail Deynekin (Mikhail "paulmann" Deynekin)
+    Mikhail Deynekin
     Website: https://deynekin.com
     Email:   rdp@deynekin.com
 
