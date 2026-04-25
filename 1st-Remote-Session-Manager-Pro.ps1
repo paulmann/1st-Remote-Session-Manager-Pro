@@ -1,12 +1,12 @@
 <# 
 .SYNOPSIS
-    1st Remote Session Manager Pro – Advanced RDP session control and shadowing toolkit.
+    1st Remote Session Manager Pro - Advanced RDP session control and shadowing toolkit.
 
 .DESCRIPTION
     Professional PowerShell-based tool for controlling, monitoring, and managing RDP sessions
     on Windows client and server systems. Supports interactive session selection, shadowing
     (view-only and full-control), disconnect/logoff operations, message sending, and
-    auto-elevation for administrative tasks. Designed to work reliably on Windows 7–11 and
+    auto-elevation for administrative tasks. Designed to work reliably on Windows 7-11 and
     Windows Server with PowerShell 5.1+ and PowerShell 7+.
 
 .PROJECT
@@ -14,12 +14,12 @@
     GitHub: https://github.com/paulmann/1st-Remote-Session-Manager-Pro
 
 .AUTHOR
-    Mikhail Deynekin (Mikhail “paulmann” Deynekin)
+    Mikhail Deynekin (Mikhail "paulmann" Deynekin)
     Website: https://deynekin.com
     Email:   mid1977@gmail.com
 
 .VERSION
-    1.2.0  (see in-script version history for detailed changelog)
+    1.3.1  (see in-script version history for detailed changelog)
 
 .REQUIREMENTS
     - Windows 7/8.1/10/11 or Windows Server with RDP enabled
@@ -103,6 +103,14 @@ param(
     [Parameter()]
     [Alias('m')]
     [string]$Message,
+
+    [Parameter()]
+    [Alias('ns')]
+    [switch]$NoConsentPrompt,
+
+    [Parameter()]
+    [Alias('esp')]
+    [switch]$EnableShadowPermissions,
     
     [Parameter()]
     [Alias('c')]
@@ -116,7 +124,6 @@ param(
     [Alias('f')]
     [switch]$Force,
     
-    # New parameters for Show-SystemStatus
     [Parameter()]
     [Alias('b')]
     [switch]$Brief,
@@ -134,6 +141,16 @@ param(
     [string]$ExportCsv
 )
 
+$script:DebugMode = [bool]$DebugMode.IsPresent
+$script:Force     = [bool]$Force.IsPresent
+$script:Quiet     = [bool]$Quiet.IsPresent
+
+if ($script:DebugMode) {
+    $VerbosePreference = 'Continue'
+    $DebugPreference   = 'Continue'
+    Write-Host ("[DEBUG-BOOT] DebugMode=True; SessionId={0}; ComputerName={1}; Args={2}" -f $SessionId, $ComputerName, ($args -join ' ')) -ForegroundColor Yellow
+}
+
 #region CONSTANTS AND CONFIGURATION
 # ============================================================================
 # GLOBAL CONSTANTS AND CONFIGURATION
@@ -141,7 +158,7 @@ param(
 
 # Script metadata
 $SCRIPT_NAME = "1st-Remote-Session-Manager-Pro"
-$SCRIPT_VERSION = "1.2.0"
+$SCRIPT_VERSION = "1.3.1"
 $SCRIPT_AUTHOR = "Mikhail Deynekin"
 $GITHUB_REPO = "https://raw.githubusercontent.com/paulmann/1st-Remote-Session-Manager-Pro"
 $RAW_GITHUB_URL = "https://raw.githubusercontent.com/paulmann/1st-Remote-Session-Manager-Pro/refs/heads/main/1st-Remote-Session-Manager-Pro.ps1"
@@ -165,11 +182,11 @@ $REGISTRY_PATHS = @{
 
 # Shadow mode values
 $SHADOW_MODES = @{
-    Disabled = 0            # No shadowing allowed
-    WithPermission = 1      # Shadow with user permission
-    WithoutPermission = 2   # Shadow without permission (view only)
-    FullControl = 3         # Full control without permission (Windows Server 2016+)
-    WithPermissionNotification = 4  # Shadow with permission and notification
+    Disabled                 = 0   # No remote control allowed
+    FullControlWithConsent   = 1   # Full Control with user's permission
+    FullControlNoConsent     = 2   # Full Control without user's permission
+    ViewWithConsent          = 3   # View Session with user's permission
+    ViewNoConsent            = 4   # View Session without user's permission
 }
 
 # Session states
@@ -413,30 +430,77 @@ function Get-SafeArray {
 
 
 function Write-DebugLog {
+    [CmdletBinding()]
     param(
+        [Parameter(Mandatory)]
         [string]$Message,
-        [string]$Level = "INFO",
+
+        [Parameter()]
+        [ValidateSet('TRACE','DEBUG','INFO','WARNING','ERROR','SUCCESS')]
+        [string]$Level = 'DEBUG',
+
+        [Parameter()]
+        [AllowNull()]
         [object]$Data = $null
     )
-    
-    if ($DebugMode -or $VerbosePreference -ne 'SilentlyContinue') {
-        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
-        $color = $COLORS.Debug
-        
-        switch ($Level) {
-            "ERROR"   { $color = $COLORS.Error; $symbol = "[X]" }
-            "SUCCESS" { $color = $COLORS.Success; $symbol = "[OK]" }
-            "WARNING" { $color = $COLORS.Warning; $symbol = "[!]" }
-            "DEBUG"   { $color = $COLORS.Debug; $symbol = "[D]" }
-            default   { $color = $COLORS.Info; $symbol = "[i]" }
+
+    $debugEnabled = $false
+    try {
+        if ($script:DebugMode -or $DebugMode -or $VerbosePreference -ne 'SilentlyContinue') {
+            $debugEnabled = $true
         }
-        
-        $logMessage = "$timestamp $symbol $Message"
-        Write-Host $logMessage -ForegroundColor $color
-        
-        if ($Data -and $DebugMode) {
-            Write-Host "Data: " -NoNewline -ForegroundColor $color
-            $Data | Format-List | Out-String | Write-Host -ForegroundColor $color
+    } catch {
+        if ($VerbosePreference -ne 'SilentlyContinue') {
+            $debugEnabled = $true
+        }
+    }
+
+    if (-not $debugEnabled) {
+        return
+    }
+
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
+    $symbol = '[D]'
+    $color  = $script:COLORS.Debug
+
+    switch ($Level) {
+        'TRACE'   { $symbol = '[T]';  $color = 'DarkGray' }
+        'DEBUG'   { $symbol = '[D]';  $color = $script:COLORS.Debug }
+        'INFO'    { $symbol = '[i]';  $color = $script:COLORS.Info }
+        'WARNING' { $symbol = '[!]';  $color = $script:COLORS.Warning }
+        'ERROR'   { $symbol = '[X]';  $color = $script:COLORS.Error }
+        'SUCCESS' { $symbol = '[OK]'; $color = $script:COLORS.Success }
+    }
+
+    Write-Host "$timestamp $symbol $Message" -ForegroundColor $color
+
+    if ($null -ne $Data) {
+        try {
+            if ($Data -is [string]) {
+                Write-Host "    $Data" -ForegroundColor $color
+            }
+            elseif ($Data -is [System.Collections.IDictionary]) {
+                foreach ($key in ($Data.Keys | Sort-Object)) {
+                    $value = $Data[$key]
+                    if ($value -is [System.Collections.IEnumerable] -and $value -isnot [string]) {
+                        $valueText = ($value | ForEach-Object { [string]$_ }) -join ', '
+                    } else {
+                        $valueText = [string]$value
+                    }
+                    Write-Host ("    {0} = {1}" -f $key, $valueText) -ForegroundColor $color
+                }
+            }
+            else {
+                $text = $Data | Format-List * | Out-String
+                foreach ($line in ($text -split "`r?`n")) {
+                    if (-not [string]::IsNullOrWhiteSpace($line)) {
+                        Write-Host "    $line" -ForegroundColor $color
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Host "    [debug-data-render-failed] $($_.Exception.Message)" -ForegroundColor $script:COLORS.Warning
         }
     }
 }
@@ -498,6 +562,136 @@ function Get-WindowsVersion {
     }
     
     return $null
+}
+
+function Convert-SessionStateToEnglish {
+    <#
+    Author: Mikhail Deynekin
+    Website: https://deynekin.com
+    Email: mid1977@gmail.com
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [AllowNull()]
+        [object]$State
+    )
+
+    $value = ''
+    try {
+        $value = [string]$State
+    } catch {
+        $value = ''
+    }
+
+    $value = $value.Trim()
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return 'Unknown'
+    }
+
+    switch -Regex ($value) {
+        '^(Active|Connected|Conn)$'                                { return 'Active' }
+        '^(Disc|Disconnected)$'                                    { return 'Disconnected' }
+        '^(Listen|Listening)$'                                     { return 'Listen' }
+
+        '^(Активно|Активный|Актив)$'                               { return 'Active' }
+        '^(Отключен|Отключена|Откл\.?|Диск|Отсоединен|Отсоединёна)$' { return 'Disconnected' }
+        '^(Прослушивание|Слушает|Ожидание)$'                       { return 'Listen' }
+
+        '^(Aktiv|Verbunden|Actif|Activo)$'                         { return 'Active' }
+        '^(Getrennt)$'                                             { return 'Disconnected' }
+
+        default { return $value }
+    }
+}
+
+function Test-SessionIsActive {
+    <#
+    Author: Mikhail Deynekin
+    Website: https://deynekin.com
+    Email: mid1977@gmail.com
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [object]$Session
+    )
+
+    $normalizedState = Convert-SessionStateToEnglish -State $Session.State
+    return ($normalizedState -eq 'Active')
+}
+
+function Enable-RDPShadowPermissions {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter()]
+        [string]$ComputerName = $env:COMPUTERNAME
+    )
+
+    if ($ComputerName -notin @($env:COMPUTERNAME, 'localhost', '.', '127.0.0.1')) {
+        Write-DebugLog "Enable-RDPShadowPermissions currently supports local computer only" "ERROR" @{
+            ComputerName = $ComputerName
+        }
+        return $false
+    }
+
+    try {
+        $shadowMode = 2  # Full control without permission
+
+        Write-DebugLog "Configuring shadow permissions for maximum access" "INFO" @{
+            ComputerName = $ComputerName
+            ShadowMode = $shadowMode
+            ShadowModeDescription = 'Full Control without user permission'
+        }
+
+        if ($PSCmdlet.ShouldProcess($ComputerName, "Enable RDP shadow permissions")) {
+            if (-not (Test-Path $REGISTRY_PATHS.TerminalServicesPolicies)) {
+                New-Item -Path $REGISTRY_PATHS.TerminalServicesPolicies -Force | Out-Null
+            }
+
+            Set-ItemProperty -Path $REGISTRY_PATHS.TerminalServer -Name 'fDenyTSConnections' -Value 0 -Type DWord -Force
+            Set-ItemProperty -Path $REGISTRY_PATHS.TerminalServicesPolicies -Name 'Shadow' -Value $shadowMode -Type DWord -Force
+            Set-ItemProperty -Path $REGISTRY_PATHS.TerminalServer -Name 'Shadow' -Value $shadowMode -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $REGISTRY_PATHS.WinStations -Name 'Shadow' -Value $shadowMode -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $REGISTRY_PATHS.WinStations -Name 'UserAuthentication' -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+
+            try {
+                Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue | Out-Null
+            } catch {
+                netsh advfirewall firewall set rule group="Remote Desktop" new enable=Yes 2>$null | Out-Null
+            }
+
+            foreach ($service in @('TermService', 'SessionEnv', 'UmRdpService')) {
+                try {
+                    Set-Service -Name $service -StartupType Automatic -ErrorAction SilentlyContinue
+                    if ((Get-Service -Name $service -ErrorAction SilentlyContinue).Status -ne 'Running') {
+                        Start-Service -Name $service -ErrorAction SilentlyContinue
+                    }
+                } catch {
+                    Write-DebugLog "Service tuning warning for $service : $($_.Exception.Message)" "WARNING"
+                }
+            }
+
+            gpupdate /target:computer /force | Out-Null
+
+            Write-DebugLog "RDP shadow permissions configured successfully" "SUCCESS" @{
+                ShadowMode = $shadowMode
+                ShadowModeDescription = 'Full Control without user permission'
+            }
+
+            return $true
+        }
+
+        return $false
+    }
+    catch {
+        Write-DebugLog "Failed to configure shadow permissions: $($_.Exception.Message)" "ERROR" @{
+            Exception = $_.Exception
+        }
+        return $false
+    }
 }
 
 function Test-ShadowSupport {
@@ -659,7 +853,7 @@ function Get-QwinstaOutputPS5 {
         $psi.RedirectStandardError  = $true
         $psi.CreateNoWindow         = $true
 
-        # OEM 437 ≈ ВХЯРШИ ASCII, ЯНЯРНЪМХЪ АСДСР МЮ ЮМЦКХИЯЙНЛ
+        # OEM 437 ? ВХЯРШИ ASCII, ЯНЯРНЪМХЪ АСДСР МЮ ЮМЦКХИЯЙНЛ
         $psi.StandardOutputEncoding = [System.Text.Encoding]::GetEncoding(437)
         $psi.StandardErrorEncoding  = [System.Text.Encoding]::GetEncoding(437)
 
@@ -739,7 +933,7 @@ function Parse-QwinstaOutputPS5 {
     
     foreach ($line in $lines) {
         # Skip headers
-        if ($line -match 'п║п∙п░п²п║|SESSIONNAME|SESSION|^[-=]+$' -or [string]::IsNullOrWhiteSpace($line)) {
+        if ($line -match 'п║п∙п░п?п║|SESSIONNAME|SESSION|^[-=]+$' -or [string]::IsNullOrWhiteSpace($line)) {
             continue
         }
         
@@ -824,7 +1018,7 @@ function Parse-QwinstaLinePS5 {
             switch ($state) {
                 "п░п╨я┌п╦п╡п╫п╬" { $state = "Active" }
                 "п■п╦я│п╨" { $state = "Disconnected" }
-                "п÷я─п╦п╣п╪" { $state = "Listen" }
+                "п?я─п╦п╣п╪" { $state = "Listen" }
                 default {
                     if ($state -match "Active|Conn|Connected") {
                         $state = "Active"
@@ -1296,7 +1490,7 @@ function Parse-QwinstaLine-Loose {
         }
 
         # Skip header and separator-like lines
-        if ($trimmed -match 'SESSIONNAME|USERNAME|ID|STATE|TYPE|DEVICE|▒┘─█▒|▐▌▀°┤▌┌─▓┘▀°|▒▌▒▓▌÷█┬┘|⌠▒▓░▌┴▒▓┌▌') {
+        if ($trimmed -match 'SESSIONNAME|USERNAME|ID|STATE|TYPE|DEVICE|▒┘─█▒|▐▌▀°┤▌┌─▓┘▀°|▒▌▒▓▌?█┬┘|?▒▓░▌┴▒▓┌▌') {
             return $null
         }
 
@@ -1497,7 +1691,7 @@ function Get-QwinstaOutputPS7 {
     param([string]$ComputerName)
 
     try {
-        # гЮОСЯЙЮЕЛ cmd /c "chcp 437 >nul & qwinsta" ≈ ОЕПЕЙКЧВЮЕЛ Б English OEM437
+        # гЮОСЯЙЮЕЛ cmd /c "chcp 437 >nul & qwinsta" ? ОЕПЕЙКЧВЮЕЛ Б English OEM437
         # ВРНАШ qwinsta БШДЮБЮК ASCII-ЯНЯРНЪМХЪ (Active, Listen, Disc) АЕГ ЙХПХККХЖШ
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName               = "cmd.exe"
@@ -1506,7 +1700,7 @@ function Get-QwinstaOutputPS7 {
         $psi.RedirectStandardError  = $true
         $psi.CreateNoWindow         = $true
 
-        # OEM 437 ≈ ЮМЦКХИЯЙЮЪ ЙНДНБЮЪ ЯРПЮМХЖЮ, ЯНЯРНЪМХЪ АСДСР ASCII
+        # OEM 437 ? ЮМЦКХИЯЙЮЪ ЙНДНБЮЪ ЯРПЮМХЖЮ, ЯНЯРНЪМХЪ АСДСР ASCII
         $psi.StandardOutputEncoding = [System.Text.Encoding]::GetEncoding(437)
         $psi.StandardErrorEncoding  = [System.Text.Encoding]::GetEncoding(437)
 
@@ -1550,12 +1744,12 @@ function Fix-RussianEncoding {
     
     # Common Russian words to detect encoding issues
     $russianPatterns = @{
-        'п║п∙п░п²п║' = 'я│п╣п╟п╫я│'
-        'п÷п·п⌡п╛п≈п·п▓п░п╒п∙п⌡п╛' = 'п©п╬п╩я▄п╥п╬п╡п╟я┌п╣п╩я▄'
-        'п║п·п║п╒п·п╞п²п≤п∙' = 'я│п╬я│я┌п╬я▐п╫п╦п╣'
+        'п║п∙п░п?п║' = 'я│п╣п╟п╫я│'
+        'п?п·п?п╛п?п·п▓п░п╒п∙п?п╛' = 'пcп╬п╩я▄п╥п╬п╡п╟я┌п╣п╩я▄'
+        'п║п·п║п╒п·п╞п?п?п∙' = 'я│п╬я│я┌п╬я▐п╫п╦п╣'
         'п░п╨я┌п╦п╡п╫п╬' = 'п╟п╨я┌п╦п╡п╫п╬'
         'п■п╦я│п╨' = 'п╢п╦я│п╨'
-        'п÷я─п╦п╣п╪' = 'п©я─п╦п╣п╪'
+        'п?я─п╦п╣п╪' = 'пcя─п╦п╣п╪'
     }
     
     # Try different encodings
@@ -1624,8 +1818,8 @@ function Parse-QwinstaOutputPS7 {
     # Manual parsing approach for Russian output
     foreach ($line in $lines) {
         # Skip headers - support Russian and English headers
-        if ($line -match 'п║п∙п░п²п║|SESSIONNAME|SESSION|^[-=]+$' -or 
-            $line -match 'п÷п·п⌡п╛п≈п·п▓п░п╒п∙п⌡п╛|USERNAME|USER') {
+        if ($line -match 'п║п∙п░п?п║|SESSIONNAME|SESSION|^[-=]+$' -or 
+            $line -match 'п?п·п?п╛п?п·п▓п░п╒п∙п?п╛|USERNAME|USER') {
             continue
         }
         
@@ -1700,7 +1894,7 @@ function Parse-QwinstaOutputPS7 {
                 switch ($state) {
                     "п░п╨я┌п╦п╡п╫п╬" { $state = "Active" }
                     "п■п╦я│п╨" { $state = "Disconnected" }
-                    "п÷я─п╦п╣п╪" { $state = "Listen" }
+                    "п?я─п╦п╣п╪" { $state = "Listen" }
                     default { 
                         # Try to match common patterns
                         if ($state -match "Active|Conn|Connected") {
@@ -3071,101 +3265,407 @@ function Add-ExtendedSessionInfo {
     return $Sessions
 }
 
-function Connect-RDPSession {
+function Write-DebugCommandLine {
+    <#
+    Author: Mikhail Deynekin
+    Website: https://deynekin.com
+    Email: mid1977@gmail.com
+    #>
+    [CmdletBinding()]
     param(
+        [Parameter(Mandatory)]
+        [string]$FilePath,
+
+        [Parameter(Mandatory)]
+        [string[]]$Arguments
+    )
+
+    $fullCommand = $FilePath
+    if ($Arguments -and $Arguments.Count -gt 0) {
+        $fullCommand += ' ' + ($Arguments -join ' ')
+    }
+
+    Write-DebugLog "Full shadow command line prepared" "DEBUG" @{
+        FilePath     = $FilePath
+        Arguments    = ($Arguments -join ' ')
+        FullCommand  = $fullCommand
+    }
+
+    if ($DebugMode) {
+        Write-Host ""
+        Write-Host "DEBUG COMMAND:" -ForegroundColor Yellow
+        Write-Host $fullCommand -ForegroundColor Cyan
+        Write-Host ""
+    }
+
+    return $fullCommand
+}
+
+function Get-SessionInventoryForShadow {
+    <#
+    Author: Mikhail Deynekin
+    Website: https://deynekin.com
+    Email: mid1977@gmail.com
+    #>
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param(
+        [Parameter()]
+        [string]$ComputerName = $env:COMPUTERNAME
+    )
+
+    $result = [System.Collections.Generic.List[object]]::new()
+
+    function Parse-SessionTextLine {
+        param(
+            [string]$Line,
+            [string]$Source
+        )
+
+        if ([string]::IsNullOrWhiteSpace($Line)) {
+            return $null
+        }
+
+        $rawLine = $Line
+        $isCurrent = $false
+
+        if ($Line.StartsWith('>')) {
+            $isCurrent = $true
+            $Line = $Line.Substring(1)
+        }
+
+        $line = $Line.TrimEnd()
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            return $null
+        }
+
+        if ($line -match '^(SESSIONNAME|USERNAME| ID |ICA-|services|console\s+)' -and
+            $line -match 'USERNAME|STATE|TYPE') {
+            return $null
+        }
+
+        if ($line -match '^(SESSIONNAME|USERNAME|\s*ID\s+STATE)' -or $line -match '^[-=\s]+$') {
+            return $null
+        }
+
+        $compact = ($line -replace '\s{2,}', '|').Trim('|')
+        $parts = @($compact -split '\|' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+
+        if ($parts.Count -lt 2) {
+            return $null
+        }
+
+        $idIndex = -1
+        for ($i = 0; $i -lt $parts.Count; $i++) {
+            if ($parts[$i] -match '^\d+$') {
+                $idIndex = $i
+                break
+            }
+        }
+
+        if ($idIndex -lt 0) {
+            return $null
+        }
+
+        $sessionId = [int]$parts[$idIndex]
+        $sessionName = ''
+        $userName = ''
+        $state = ''
+        $type = ''
+        $device = ''
+
+        switch ($idIndex) {
+            1 {
+                $sessionName = ''
+                $userName = $parts[0]
+            }
+            2 {
+                $sessionName = $parts[0]
+                $userName = $parts[1]
+            }
+            default {
+                if ($parts.Count -ge 4) {
+                    $sessionName = $parts[0]
+                    $userName = $parts[1]
+                }
+            }
+        }
+
+        if ($idIndex + 1 -lt $parts.Count) { $state = $parts[$idIndex + 1] }
+        if ($idIndex + 2 -lt $parts.Count) { $type  = $parts[$idIndex + 2] }
+        if ($idIndex + 3 -lt $parts.Count) { $device = $parts[$idIndex + 3] }
+
+        if ([string]::IsNullOrWhiteSpace($userName)) {
+            $userName = 'SYSTEM'
+        }
+
+        if ([string]::IsNullOrWhiteSpace($sessionName)) {
+            if ($sessionId -eq 0) {
+                $sessionName = 'services'
+            } elseif ($sessionId -eq 1) {
+                $sessionName = 'console'
+            } elseif ($sessionId -eq 65536) {
+                $sessionName = 'rdp-tcp'
+            }
+        }
+
+        switch -Regex ($state) {
+            '^(Active|Conn|Connected|Активно|Aktiv|Actif|Activo)$' { $state = 'Active'; break }
+            '^(Disc|Disconnected|Отключен|Откл\.?|Getrennt)$'      { $state = 'Disconnected'; break }
+            '^(Listen|Listening|Прослушивание)$'                   { $state = 'Listen'; break }
+            default {
+                if ([string]::IsNullOrWhiteSpace($state)) {
+                    if ($sessionId -eq 65536 -or $sessionName -eq 'rdp-tcp') {
+                        $state = 'Listen'
+                    } else {
+                        $state = 'Unknown'
+                    }
+                }
+            }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($type)) {
+            switch -Regex ($sessionName) {
+                '^rdp-tcp#\d+$' { $type = 'RDP'; break }
+                '^rdp-tcp$'     { $type = 'Listener'; break }
+                '^console$'     { $type = 'Console'; break }
+                '^services$'    { $type = 'Services'; break }
+                default         { $type = 'Unknown' }
+            }
+        }
+
+        return [PSCustomObject]@{
+            SessionName = $sessionName
+            UserName    = $userName
+            SessionId   = $sessionId
+            State       = $state
+            Type        = $type
+            Device      = $device
+            IsCurrent   = $isCurrent
+            Source      = $Source
+            RawLine     = $rawLine
+        }
+    }
+
+    try {
+        $isLocal = $ComputerName -in @($env:COMPUTERNAME, 'localhost', '.', '127.0.0.1')
+
+        $queryOutput = $null
+        try {
+            if ($isLocal) {
+                $queryOutput = (& query session 2>$null | Out-String)
+            } else {
+                $queryOutput = (& query session "/server:$ComputerName" 2>$null | Out-String)
+            }
+        } catch {
+            Write-DebugLog "query session failed for shadow inventory: $($_.Exception.Message)" "WARNING"
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($queryOutput)) {
+            $queryLines = @($queryOutput -split '\r?\n')
+            foreach ($line in $queryLines) {
+                $parsed = Parse-SessionTextLine -Line $line -Source 'query session'
+                if ($parsed) {
+                    $result.Add($parsed)
+                }
+            }
+        }
+
+        if ($result.Count -eq 0) {
+            $qwinstaOutput = $null
+            try {
+                $qwinstaOutput = Get-QwinstaOutputPS7 -ComputerName $ComputerName
+            } catch {
+                Write-DebugLog "Get-QwinstaOutputPS7 failed for shadow inventory: $($_.Exception.Message)" "WARNING"
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($qwinstaOutput)) {
+                $qwinstaLines = @($qwinstaOutput -split '\r?\n')
+                foreach ($line in $qwinstaLines) {
+                    $parsed = Parse-SessionTextLine -Line $line -Source 'qwinsta'
+                    if ($parsed) {
+                        $result.Add($parsed)
+                    }
+                }
+            }
+        }
+
+        $final = @(
+            $result |
+            Group-Object SessionId |
+            ForEach-Object { $_.Group | Select-Object -First 1 } |
+            Sort-Object SessionId
+        )
+
+        Write-DebugLog "Shadow session inventory built" "DEBUG" @{
+            ComputerName = $ComputerName
+            Count        = $final.Count
+            Sessions     = @($final | ForEach-Object { "ID=$($_.SessionId);User=$($_.UserName);State=$($_.State);Name=$($_.SessionName);Src=$($_.Source)" })
+        }
+
+        return $final
+    }
+    catch {
+        Write-DebugLog "Error building shadow session inventory: $($_.Exception.Message)" "ERROR" @{
+            ComputerName = $ComputerName
+            Exception    = $_.Exception
+        }
+        return @()
+    }
+}
+
+function Connect-RDPSession {
+    <#
+    Author: Mikhail Deynekin
+    Website: https://deynekin.com
+    Email: mid1977@gmail.com
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateRange(0, 65536)]
         [int]$SessionId,
-        [bool]$ViewOnly = $false,
+
+        [Parameter()]
+        [switch]$ViewOnly,
+
+        [Parameter()]
+        [string]$ComputerName = $env:COMPUTERNAME,
+
+        [Parameter()]
+        [switch]$NoConsentPrompt,
+
+        [Parameter()]
         [string[]]$AdditionalParams = @()
     )
-    
-    Write-DebugLog "Preparing to connect to session $SessionId" "INFO" @{
-        SessionId = $SessionId
-        ViewOnly = $ViewOnly
+
+    Write-DebugLog "Preparing shadow connection to session $SessionId" "INFO" @{
+        SessionId        = $SessionId
+        ViewOnly         = $ViewOnly.IsPresent
+        ComputerName     = $ComputerName
+        NoConsentPrompt  = $NoConsentPrompt.IsPresent
         AdditionalParams = $AdditionalParams
     }
-    
-    # Validate session exists
-    $sessions = Get-RDPSessions
-    $targetSession = $sessions | Where-Object { $_.SessionId -eq $SessionId }
-    
-    if (-not $targetSession) {
-        Write-DebugLog "Session $SessionId not found" "ERROR"
-        return $false
-    }
-    
-    if ($targetSession.State -ne $SESSION_STATES.Active -and 
-        $targetSession.State -ne $SESSION_STATES.Connected) {
-        Write-DebugLog "Session $SessionId is not in active state: $($targetSession.State)" "WARNING"
-        
-        if (-not $Force) {
-            $confirm = Read-Host "Session is not active. Connect anyway? (y/N)"
-            if ($confirm -ne 'y') {
-                return $false
-            }
-        }
-    }
-    
-    # Build mstsc command
-    $mstscParams = New-Object System.Collections.Generic.List[string]
-    
-    # Add default parameters
-    foreach ($param in $DEFAULT_MSTSC_PARAMS) {
-        $mstscParams.Add($param)
-    }
-    
-    # Add shadow parameter
-    if ($ViewOnly) {
-        $mstscParams.Add("/shadow:$SessionId")
-        $mstscParams.Add("/noconsentprompt")
-    } else {
-        $mstscParams.Add("/shadow:$SessionId")
-        $mstscParams.Add("/control")
-    }
-    
-    # Add any additional parameters
-    foreach ($param in $AdditionalParams) {
-        $mstscParams.Add($param)
-    }
-    
-    # Add v parameter if ComputerName is specified and not localhost
-    if ($ComputerName -ne $env:COMPUTERNAME -and $ComputerName -ne 'localhost') {
-        $mstscParams.Add("/v:$ComputerName")
-    }
-    
-    $command = "mstsc " + ($mstscParams -join ' ')
-    Write-DebugLog "Executing command: $command" "DEBUG"
-    
+
     try {
-        # Start mstsc process
-        $processStartInfo = New-Object System.Diagnostics.ProcessStartInfo
-        $processStartInfo.FileName = "mstsc.exe"
-        $processStartInfo.Arguments = $mstscParams -join ' '
-        $processStartInfo.UseShellExecute = $true
-        
-        $process = New-Object System.Diagnostics.Process
-        $process.StartInfo = $processStartInfo
-        
-        if ($process.Start()) {
-            Write-DebugLog "Successfully launched mstsc for session $SessionId" "SUCCESS"
-            
-            # Wait a moment for connection to establish
-            Start-Sleep -Seconds 2
-            
-            # Verify connection
-            if (-not $process.HasExited) {
-                Write-DebugLog "RDP session established" "DEBUG"
-                return $true
-            } else {
-                Write-DebugLog "mstsc process exited unexpectedly" "WARNING"
-                return $false
+        $sessions = @(Get-SessionInventoryForShadow -ComputerName $ComputerName)
+        $targetSession = $sessions | Where-Object { [int]$_.SessionId -eq $SessionId } | Select-Object -First 1
+
+        if (-not $targetSession) {
+            Write-DebugLog "Session $SessionId not found on $ComputerName" "ERROR" @{
+                ComputerName = $ComputerName
+                AvailableIds = @($sessions | ForEach-Object { $_.SessionId })
             }
-        } else {
-            Write-DebugLog "Failed to start mstsc process" "ERROR"
             return $false
         }
-        
-    } catch {
-        Write-DebugLog "Error connecting to session: $_" "ERROR" @{ ErrorDetails = $_.Exception }
+
+        $originalState = [string]$targetSession.State
+        $normalizedState = Convert-SessionStateToEnglish -State $targetSession.State
+        $targetSession.State = $normalizedState
+
+        Write-DebugLog "Shadow target session resolved" "DEBUG" @{
+            SessionId       = $targetSession.SessionId
+            UserName        = $targetSession.UserName
+            SessionName     = $targetSession.SessionName
+            OriginalState   = $originalState
+            NormalizedState = $normalizedState
+            Source          = $targetSession.Source
+        }
+
+        if ($normalizedState -ne 'Active') {
+            Write-DebugLog "Session $SessionId found, but state is '$normalizedState'" "WARNING" @{
+                OriginalState = $originalState
+                NormalizedState = $normalizedState
+                Session = $targetSession
+            }
+
+            if (-not $Force -and -not $Quiet) {
+                $confirm = Read-Host "Session $SessionId state is '$normalizedState'. Try shadow anyway? (y/N)"
+                if ($confirm -notin @('y', 'Y')) {
+                    return $false
+                }
+            }
+        } else {
+            Write-DebugLog "Session $SessionId is active, continuing without confirmation" "INFO" @{
+                OriginalState = $originalState
+                NormalizedState = $normalizedState
+            }
+        }
+
+        $argList = [System.Collections.Generic.List[string]]::new()
+        $argList.Add("/shadow:$SessionId")
+
+        if (-not $ViewOnly.IsPresent) {
+            $argList.Add('/control')
+        }
+
+        if ($NoConsentPrompt.IsPresent) {
+            $argList.Add('/noConsentPrompt')
+        }
+
+        $isLocal = $ComputerName -in @($env:COMPUTERNAME, 'localhost', '.', '127.0.0.1')
+        if (-not $isLocal) {
+            $argList.Add("/v:$ComputerName")
+        }
+
+        foreach ($param in $AdditionalParams) {
+            if (-not [string]::IsNullOrWhiteSpace($param)) {
+                $argList.Add($param.Trim())
+            }
+        }
+
+        $fullCommand = 'mstsc.exe ' + ($argList -join ' ')
+
+        Write-DebugLog "Full shadow command line prepared" "DEBUG" @{
+            FullCommand = $fullCommand
+        }
+
+        if ($DebugMode) {
+            Write-Host ""
+            Write-Host "DEBUG COMMAND:" -ForegroundColor Yellow
+            Write-Host $fullCommand -ForegroundColor Cyan
+            Write-Host ""
+        }
+
+        $psi = [System.Diagnostics.ProcessStartInfo]::new()
+        $psi.FileName = 'mstsc.exe'
+        $psi.Arguments = ($argList -join ' ')
+        $psi.UseShellExecute = $true
+
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $psi
+
+        if (-not $process.Start()) {
+            Write-DebugLog "Failed to start mstsc.exe" "ERROR" @{
+                FullCommand = $fullCommand
+            }
+            return $false
+        }
+
+        Write-DebugLog "mstsc.exe launched for shadow session $SessionId" "SUCCESS" @{
+            FullCommand = $fullCommand
+            ProcessId   = $process.Id
+        }
+
+        Start-Sleep -Seconds 2
+
+        if (-not $process.HasExited) {
+            return $true
+        }
+
+        Write-DebugLog "mstsc.exe exited immediately after launch" "WARNING" @{
+            ExitCode    = $process.ExitCode
+            FullCommand = $fullCommand
+        }
+
+        return $false
+    }
+    catch {
+        Write-DebugLog "Error connecting to shadow session: $($_.Exception.Message)" "ERROR" @{
+            Exception    = $_.Exception
+            SessionId    = $SessionId
+            ComputerName = $ComputerName
+        }
         return $false
     }
 }
@@ -3797,13 +4297,12 @@ function Get-ShadowConfigurationPS5 {
             
             # Fixed version for PowerShell 5.1 - traditional switch operator
             switch ($shadowValue.Shadow) {
-                0 { $config.ShadowModeDescription = "Disabled" }
-                1 { $config.ShadowModeDescription = "With Permission" }
-                2 { $config.ShadowModeDescription = "Without Permission" }
-                3 { $config.ShadowModeDescription = "Full Control" }
-                4 { $config.ShadowModeDescription = "With Permission and Notification" }
-                default { $config.ShadowModeDescription = "Unknown ($($shadowValue.Shadow))" }
-            }
+		    0 { $config.ShadowModeDescription = 'Disabled' }
+		    1 { $config.ShadowModeDescription = 'Full Control with User Permission' }
+		    2 { $config.ShadowModeDescription = 'Full Control without User Permission' }
+		    3 { $config.ShadowModeDescription = 'View Session with User Permission' }
+		    4 { $config.ShadowModeDescription = 'View Session without User Permission' }
+		    default { $config.ShadowModeDescription = "Unknown ($($shadowValue.Shadow))" }            }
         } else {
             $config.ShadowMode = $null
             $config.ShadowModeDescription = "Not Configured"
@@ -4030,17 +4529,27 @@ function Show-StatusReportPS5 {
     }
     
     # Section 3: Shadow Configuration
-    Write-Host "`n[3] SHADOW CONFIGURATION" -ForegroundColor $Color.Header
-    if ($StatusData.ShadowConfiguration.Error) {
-        Write-Host "   Error: $($StatusData.ShadowConfiguration.Error)" -ForegroundColor $Color.Error
+Write-Host "`n3. SHADOW CONFIGURATION" -ForegroundColor $COLORS.Header
+if ($StatusData.ShadowConfiguration.Error) {
+    Write-Host "Error: $($StatusData.ShadowConfiguration.Error)" -ForegroundColor $COLORS.Error
+}
+else {
+    $shadowColor = if ($StatusData.ShadowConfiguration.FullControlWithoutPermission) {
+        $COLORS.Success
+    } elseif ($StatusData.ShadowConfiguration.NoConsentRequired) {
+        $COLORS.Warning
     } else {
-        $shadowColor = if ($StatusData.ShadowConfiguration.ShadowMode -ge 2) { $Color.Success } else { $Color.Warning }
-        Write-Host "   Shadow Mode  : $($StatusData.ShadowConfiguration.ShadowModeDescription)" -ForegroundColor $shadowColor
-        
-        if ($StatusData.ShadowConfiguration.LegacyShadowMode) {
-            Write-Host "   Legacy Mode  : $($StatusData.ShadowConfiguration.LegacyShadowMode)" -ForegroundColor $Color.Debug
-        }
+        $COLORS.Error
     }
+
+    Write-Host "Shadow Mode        : $($StatusData.ShadowConfiguration.ShadowModeDescription)" -ForegroundColor $shadowColor
+    Write-Host "Policy Source      : $($StatusData.ShadowConfiguration.PolicySource)" -ForegroundColor $COLORS.Debug
+    Write-Host "No Consent Needed  : $(if ($StatusData.ShadowConfiguration.NoConsentRequired) { 'Yes' } else { 'No' })" -ForegroundColor $(if ($StatusData.ShadowConfiguration.NoConsentRequired) { $COLORS.Success } else { $COLORS.Warning })
+    Write-Host "Full Control Mode  : $(if ($StatusData.ShadowConfiguration.FullControlWithoutPermission) { 'Yes' } else { 'No' })" -ForegroundColor $(if ($StatusData.ShadowConfiguration.FullControlWithoutPermission) { $COLORS.Success } else { $COLORS.Warning })
+    Write-Host "Legacy Shadow Mode : $(if ($null -ne $StatusData.ShadowConfiguration.LegacyShadowMode) { $StatusData.ShadowConfiguration.LegacyShadowMode } else { 'N/A' })" -ForegroundColor $COLORS.Debug
+    Write-Host "WinStation Mode    : $(if ($null -ne $StatusData.ShadowConfiguration.WinStationShadowMode) { $StatusData.ShadowConfiguration.WinStationShadowMode } else { 'N/A' })" -ForegroundColor $COLORS.Debug
+    Write-Host "Summary            : $($StatusData.ShadowConfiguration.StatusSummary)" -ForegroundColor $shadowColor
+}
     
     # Section 4: Firewall Status
     Write-Host "`n[4] FIREWALL STATUS" -ForegroundColor $Color.Header
@@ -4230,49 +4739,100 @@ function Get-RDPConfigurationPS7 {
 }
 
 function Get-ShadowConfigurationPS7 {
+    <#
+    Author: Mikhail Deynekin
+    Website: https://deynekin.com
+    Email: mid1977@gmail.com
+    #>
+    [CmdletBinding()]
+    param()
+
     try {
-        # Query multiple registry paths with compatibility
-        $config = @{}
-        
-        # First check policies path
+        $config = [ordered]@{
+            ShadowMode                    = $null
+            ShadowModeDescription         = 'Not Configured'
+            LegacyShadowMode              = $null
+            WinStationShadowMode          = $null
+            RDPEnabled                    = $null
+            NoConsentRequired             = $false
+            FullControlWithoutPermission  = $false
+            ViewOnlyWithoutPermission     = $false
+            PolicySource                  = 'None'
+            StatusSummary                 = 'Not Configured'
+        }
+
         try {
-            $shadowValue = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" -Name "Shadow" -ErrorAction SilentlyContinue
-            
-            if ($shadowValue) {
-                $config.ShadowMode = $shadowValue.Shadow
-                
-                # Fixed version for PowerShell 5.1/7+ compatibility using traditional switch
-                switch ($shadowValue.Shadow) {
-                    0 { $config.ShadowModeDescription = "Disabled" }
-                    1 { $config.ShadowModeDescription = "With Permission" }
-                    2 { $config.ShadowModeDescription = "Without Permission" }
-                    3 { $config.ShadowModeDescription = "Full Control" }
-                    4 { $config.ShadowModeDescription = "With Permission and Notification" }
-                    default { $config.ShadowModeDescription = "Unknown ($($shadowValue.Shadow))" }
+            $ts = Get-ItemProperty -Path $REGISTRY_PATHS.TerminalServer -ErrorAction SilentlyContinue
+            if ($ts -and $null -ne $ts.fDenyTSConnections) {
+                $config.RDPEnabled = ($ts.fDenyTSConnections -eq 0)
+            }
+        } catch {
+        }
+
+        try {
+            $policy = Get-ItemProperty -Path $REGISTRY_PATHS.TerminalServicesPolicies -Name 'Shadow' -ErrorAction SilentlyContinue
+            if ($policy -and $null -ne $policy.Shadow) {
+                $config.ShadowMode = [int]$policy.Shadow
+                $config.PolicySource = 'GroupPolicy'
+            }
+        } catch {
+        }
+
+        try {
+            $legacy = Get-ItemProperty -Path $REGISTRY_PATHS.TerminalServer -Name 'Shadow' -ErrorAction SilentlyContinue
+            if ($legacy -and $null -ne $legacy.Shadow) {
+                $config.LegacyShadowMode = [int]$legacy.Shadow
+                if ($null -eq $config.ShadowMode) {
+                    $config.ShadowMode = [int]$legacy.Shadow
+                    $config.PolicySource = 'LegacyTerminalServer'
                 }
-            } else {
-                $config.ShadowMode = $null
-                $config.ShadowModeDescription = "Not Configured"
             }
         } catch {
-            $config.ShadowMode = $null
-            $config.ShadowModeDescription = "Error accessing registry"
         }
-        
-        # Check legacy path
+
         try {
-            $legacyShadow = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "Shadow" -ErrorAction SilentlyContinue
-            if ($legacyShadow) {
-                $config.LegacyShadowMode = $legacyShadow.Shadow
+            $winstation = Get-ItemProperty -Path $REGISTRY_PATHS.WinStations -Name 'Shadow' -ErrorAction SilentlyContinue
+            if ($winstation -and $null -ne $winstation.Shadow) {
+                $config.WinStationShadowMode = [int]$winstation.Shadow
             }
         } catch {
-            # Silently continue if legacy path not accessible
         }
-        
-        return $config
-        
-    } catch {
-        return @{ Error = $_.Exception.Message }
+
+        switch ($config.ShadowMode) {
+            0 { $config.ShadowModeDescription = 'Disabled' }
+            1 { $config.ShadowModeDescription = 'With Permission' }
+            2 {
+                $config.ShadowModeDescription = 'View Only without Permission'
+                $config.NoConsentRequired = $true
+                $config.ViewOnlyWithoutPermission = $true
+            }
+            3 {
+                $config.ShadowModeDescription = 'Full Control without Permission'
+                $config.NoConsentRequired = $true
+                $config.FullControlWithoutPermission = $true
+            }
+            4 { $config.ShadowModeDescription = 'With Permission and Notification' }
+            default { $config.ShadowModeDescription = "Unknown ($($config.ShadowMode))" }
+        }
+
+        if ($config.FullControlWithoutPermission) {
+            $config.StatusSummary = 'READY: Full control without user permission'
+        } elseif ($config.ViewOnlyWithoutPermission) {
+            $config.StatusSummary = 'PARTIAL: View only without user permission'
+        } elseif ($config.ShadowMode -eq 1 -or $config.ShadowMode -eq 4) {
+            $config.StatusSummary = 'CONSENT REQUIRED: User permission is required'
+        } elseif ($config.ShadowMode -eq 0) {
+            $config.StatusSummary = 'DISABLED: Shadowing is disabled'
+        } else {
+            $config.StatusSummary = 'NOT CONFIGURED'
+        }
+
+        return [PSCustomObject]$config
+    }
+    catch {
+        return [PSCustomObject]@{
+            Error = $_.Exception.Message
+        }
     }
 }
 
@@ -4310,10 +4870,10 @@ function Get-ServiceStatusPS7 {
     $services = @()
     
     $serviceNames = @(
-        @{ Name = "TermService"; DisplayName = "Remote Desktop Services" }
-        @{ Name = "SessionEnv"; DisplayName = "Remote Desktop Configuration" }
-        @{ Name = "UmRdpService"; DisplayName = "Remote Desktop Services UserMode Port Redirector" }
-        @{ Name = "WinRM"; DisplayName = "Windows Remote Management" }
+        @{ Name = "TermService"; DisplayName = "RD Services" } #Remote Desktop Services
+        @{ Name = "SessionEnv"; DisplayName = "RD Configuration" } #Remote Desktop Configuration
+        @{ Name = "UmRdpService"; DisplayName = "UserMode Port Redirector" } #Remote Desktop Services UserMode Port Redirector
+        @{ Name = "WinRM"; DisplayName = "Remote Management" } #Windows Remote Management
         @{ Name = "Spooler"; DisplayName = "Print Spooler" }
     )
     
@@ -4480,7 +5040,7 @@ function Get-PerformanceMetricsPS7 {
     }
 }
 
-# Desc:   Show-StatusReportPS7 ≈ two-column grid status report renderer.
+# Desc:   Show-StatusReportPS7 ? two-column grid status report renderer.
 #         Depends on: Format-Cell, Format-CellPair, Format-SectionDataPS7,
 #                     Format-PercentageBar, Show-BriefStatusPS7
 
@@ -4544,7 +5104,7 @@ function Show-StatusReportPS7 {
     Write-Host "$emojiColor$statusEmoji$R Status: $($C.Info)Generated $collectionTime$R"
     Write-Host "   |-- Computer: $($C.Debug)$env:COMPUTERNAME$R | User: $($C.Debug)$([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)$R | PS: $($C.Debug)$($PSVersionTable.PSVersion)$R | Admin: $adminText"
 
-    # Brief mode ≈ show compact summary and exit
+    # Brief mode ? show compact summary and exit
     if ($Brief) {
         Write-Host "`n$($C.Warning)[Brief Mode - Showing Summary Only]$R"
         Show-BriefStatusPS7 -StatusData $StatusData -Color $C
@@ -4618,7 +5178,7 @@ function Show-StatusReportPS7 {
 
         if ($pm.DiskUsage) {
             foreach ($disk in $pm.DiskUsage) {
-                $diskText = "$($disk.DeviceID) $($disk.UsedPercent)% used ≈ $($disk.FreeGB) GB free of $($disk.SizeGB) GB"
+                $diskText = "$($disk.DeviceID) $($disk.UsedPercent)% used ? $($disk.FreeGB) GB free of $($disk.SizeGB) GB"
                 Write-Host "$($C.Header)|$R $($C.Debug)Disk: $diskText$R"
             }
         }
@@ -4686,7 +5246,7 @@ function Format-Cell {
         $Text = $Text.Substring(0, $Width - 3) + '...'
     }
 
-    # PadRight on plain text ≈ correct visible width every time
+    # PadRight on plain text ? correct visible width every time
     $padded = $Text.PadRight($Width)
 
     return "${ColorCode}${padded}${ResetCode}"
@@ -4714,7 +5274,7 @@ function Format-CellPair {
     $padded = $raw.PadRight($Width)
     if ($padded.Length -gt $Width) { $padded = $padded.Substring(0, $Width - 3) + '...' }
 
-    # Rebuild with colors but on an already-padded string ≈
+    # Rebuild with colors but on an already-padded string ?
     # find the colon position in padded text and split there
     $colonPos = $padded.IndexOf(': ')
     if ($colonPos -ge 0) {
@@ -4723,7 +5283,7 @@ function Format-CellPair {
         return "${LabelColor}${labelPart}${ValueColor}${valuePart}${ResetCode}"
     }
 
-    # Fallback ≈ no colon found
+    # Fallback ? no colon found
     return "${LabelColor}${padded}${ResetCode}"
 }
 
@@ -4739,7 +5299,7 @@ function Format-SectionDataPS7 {
         [Parameter(Mandatory)] $Color    # hashtable: Header/Success/Warning/Error/Info/Debug/Reset
     )
 
-    # Column width ≈ must match the +----...----+ border in Show-StatusReportPS7
+    # Column width ? must match the +----...----+ border in Show-StatusReportPS7
     $W  = 34
     $C  = $Color
     $R  = $C.Reset
@@ -4910,7 +5470,7 @@ function Format-SectionDataPS7 {
         }
     }
 
-    # -- Pad to exactly 4 lines ≈ grid renderer expects a fixed row count ------
+    # -- Pad to exactly 4 lines ? grid renderer expects a fixed row count ------
     while ($lines.Count -lt 4) {
         $lines.Add((Format-Cell '' -Width $W))
     }
@@ -5770,82 +6330,111 @@ Administrator: $(Test-IsAdministrator)
 
 #endregion
 
+# ---------------------------------------------------------------------------
+# Restore script parameters from PSBoundParameters if they were overwritten
+# somewhere in the script by local variables or duplicate scopes.
+# This block must be placed immediately BEFORE #region MAIN EXECUTION
+# ---------------------------------------------------------------------------
+
+if ($PSBoundParameters.ContainsKey('SessionId'))          { $script:SessionId          = [int]$PSBoundParameters['SessionId'] } else { $script:SessionId = -1 }
+if ($PSBoundParameters.ContainsKey('Help'))               { $script:Help               = [bool]$PSBoundParameters['Help'].IsPresent } else { $script:Help = $false }
+if ($PSBoundParameters.ContainsKey('Version'))            { $script:Version            = [bool]$PSBoundParameters['Version'].IsPresent } else { $script:Version = $false }
+if ($PSBoundParameters.ContainsKey('Status'))             { $script:Status             = [bool]$PSBoundParameters['Status'].IsPresent } else { $script:Status = $false }
+if ($PSBoundParameters.ContainsKey('Sessions'))           { $script:Sessions           = [bool]$PSBoundParameters['Sessions'].IsPresent } else { $script:Sessions = $false }
+if ($PSBoundParameters.ContainsKey('Update'))             { $script:Update             = [bool]$PSBoundParameters['Update'].IsPresent } else { $script:Update = $false }
+if ($PSBoundParameters.ContainsKey('DebugMode'))          { $script:DebugMode          = [bool]$PSBoundParameters['DebugMode'].IsPresent } else { $script:DebugMode = $false }
+if ($PSBoundParameters.ContainsKey('ViewOnly'))           { $script:ViewOnly           = [bool]$PSBoundParameters['ViewOnly'].IsPresent } else { $script:ViewOnly = $false }
+if ($PSBoundParameters.ContainsKey('Disconnect'))         { $script:Disconnect         = [bool]$PSBoundParameters['Disconnect'].IsPresent } else { $script:Disconnect = $false }
+if ($PSBoundParameters.ContainsKey('Logoff'))             { $script:Logoff             = [bool]$PSBoundParameters['Logoff'].IsPresent } else { $script:Logoff = $false }
+if ($PSBoundParameters.ContainsKey('Quiet'))              { $script:Quiet              = [bool]$PSBoundParameters['Quiet'].IsPresent } else { $script:Quiet = $false }
+if ($PSBoundParameters.ContainsKey('Force'))              { $script:Force              = [bool]$PSBoundParameters['Force'].IsPresent } else { $script:Force = $false }
+if ($PSBoundParameters.ContainsKey('Brief'))              { $script:Brief              = [bool]$PSBoundParameters['Brief'].IsPresent } else { $script:Brief = $false }
+if ($PSBoundParameters.ContainsKey('IncludePerformance')) { $script:IncludePerformance = [bool]$PSBoundParameters['IncludePerformance'].IsPresent } else { $script:IncludePerformance = $false }
+
+if ($PSBoundParameters.ContainsKey('Message')) {
+    $script:Message = [string]$PSBoundParameters['Message']
+} else {
+    $script:Message = $null
+}
+
+if ($PSBoundParameters.ContainsKey('ComputerName')) {
+    $script:ComputerName = [string]$PSBoundParameters['ComputerName']
+} elseif ([string]::IsNullOrWhiteSpace($script:ComputerName)) {
+    $script:ComputerName = $env:COMPUTERNAME
+}
+
+if ($PSBoundParameters.ContainsKey('ExportJson')) {
+    $script:ExportJson = [string]$PSBoundParameters['ExportJson']
+} else {
+    $script:ExportJson = $null
+}
+
+if ($PSBoundParameters.ContainsKey('ExportCsv')) {
+    $script:ExportCsv = [string]$PSBoundParameters['ExportCsv']
+} else {
+    $script:ExportCsv = $null
+}
+
+#Write-Host ("[DEBUG-RESTORE] DebugMode={0}; SessionId={1}; ComputerName={2}; ViewOnly={3}" -f `
+#    $script:DebugMode, $script:SessionId, $script:ComputerName, $script:ViewOnly) -ForegroundColor DarkGray
+
+
 #region MAIN EXECUTION
-# ============================================================================
-# MAIN EXECUTION LOGIC
-# ============================================================================
+
+Write-DebugLog "MAIN EXECUTION START" "INFO" @{
+    BoundParameters   = ($PSBoundParameters.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join '; '
+    ComputerName      = $script:ComputerName
+    DebugMode         = $script:DebugMode
+    Disconnect        = $script:Disconnect
+    Force             = $script:Force
+    Help              = $script:Help
+    IsAdministrator   = (Test-IsAdministrator)
+    Logoff            = $script:Logoff
+    Message           = $script:Message
+    PowerShellVersion = $PSVersionTable.PSVersion.ToString()
+    Quiet             = $script:Quiet
+    SessionId         = $script:SessionId
+    Sessions          = $script:Sessions
+    Status            = $script:Status
+    Update            = $script:Update
+    Version           = $script:Version
+    ViewOnly          = $script:ViewOnly
+}
 
 Write-DebugLog "Starting Remote Session Manager Pro v$SCRIPT_VERSION" "INFO" @{
-    ComputerName = $ComputerName
-    User = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    PowerShellVersion = $PSVersionTable.PSVersion
-    Parameters = $PSBoundParameters
+    ComputerName      = $script:ComputerName
+    User              = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    PowerShellVersion = $PSVersionTable.PSVersion.ToString()
+    Parameters        = ($PSBoundParameters.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join '; '
 }
 
-# Step 1: Handle help and version requests first (no admin required)
-if ($Help) {
+if ($script:Help) {
     Show-Help
+    Write-DebugLog "Script execution completed" "SUCCESS"
     exit $ERROR_CODES.Success
 }
 
-if ($Version) {
+if ($script:Version) {
     Show-Version
+    Write-DebugLog "Script execution completed" "SUCCESS"
     exit $ERROR_CODES.Success
 }
 
-# Step 2: Check if running as administrator (required for most operations)
 if (-not (Test-IsAdministrator)) {
     Write-Host "Administrative privileges are required for this operation!" -ForegroundColor $COLORS.Error
     Write-Host "Please restart PowerShell as Administrator and run the script again." -ForegroundColor $COLORS.Warning
-    
-    # Try to self-elevate
-    if (-not $Quiet) {
-        $elevate = Read-Host "Attempt to restart as administrator? (Y/n)"
-        
-        if ($elevate -ne 'n') {
-            try {
-                $scriptPath = $MyInvocation.MyCommand.Path
-                
-                $psi = New-Object System.Diagnostics.ProcessStartInfo
-                $psi.FileName = "powershell.exe"
-                $psi.Arguments = "-ExecutionPolicy Bypass -File `"$scriptPath`" " + ($PSBoundParameters | ForEach-Object { 
-                    if ($_.Key -ne 'Help' -and $_.Key -ne 'Version') { 
-                        "-$($_.Key):$($_.Value)" 
-                    } 
-                }) -join ' '
-                $psi.Verb = "runas"
-                $psi.UseShellExecute = $true
-                
-                [System.Diagnostics.Process]::Start($psi) | Out-Null
-                exit $ERROR_CODES.Success
-            } catch {
-                Write-Host "Failed to restart as administrator: $_" -ForegroundColor $COLORS.Error
-            }
-        }
-    }
-    
     exit $ERROR_CODES.AdminRequired
 }
 
-# Step 3: Check execution policy
 if (-not (Test-ExecutionPolicy)) {
     Write-Host "Current execution policy may prevent script execution." -ForegroundColor $COLORS.Warning
-    Write-Host "To allow script execution, run one of the following commands:" -ForegroundColor $COLORS.Info
-    Write-Host "  Set-ExecutionPolicy RemoteSigned -Scope CurrentUser" -ForegroundColor $COLORS.Debug
-    Write-Host "  Set-ExecutionPolicy Bypass -Scope Process" -ForegroundColor $COLORS.Debug
-    Write-Host "" -ForegroundColor $COLORS.Debug
-    Write-Host "Or run this script with:" -ForegroundColor $COLORS.Info
-    Write-Host "  PowerShell -ExecutionPolicy Bypass -File $SCRIPT_NAME.ps1" -ForegroundColor $COLORS.Debug
-    
-    if (-not $Force) {
+    if (-not $script:Force) {
         exit $ERROR_CODES.ExecutionPolicy
     }
 }
 
-# Step 4: Handle update request
-if ($Update) {
+if ($script:Update) {
     $updateResult = Update-Script
-    
     if ($updateResult) {
         exit $ERROR_CODES.Success
     } else {
@@ -5853,78 +6442,80 @@ if ($Update) {
     }
 }
 
-# Step 5: Handle status request
-if ($Status) {
-    # Build parameters for Show-SystemStatus
+if ($script:Status) {
     $statusParams = @{}
-    if ($Brief) { $statusParams.Brief = $true }
-    if ($IncludePerformance) { $statusParams.IncludePerformance = $true }
-    if ($ExportJson) { $statusParams.ExportJson = $ExportJson }
-    if ($ExportCsv) { $statusParams.ExportCsv = $ExportCsv }
-    
-    $statusResult = Show-SystemStatus @statusParams
+    if ($script:Brief)              { $statusParams.Brief = $true }
+    if ($script:IncludePerformance) { $statusParams.IncludePerformance = $true }
+    if ($script:ExportJson)         { $statusParams.ExportJson = $script:ExportJson }
+    if ($script:ExportCsv)          { $statusParams.ExportCsv  = $script:ExportCsv }
+
+    Show-SystemStatus @statusParams
     exit $ERROR_CODES.Success
 }
 
-# Step 6: Check and configure shadow support if needed
-if ($SessionId -ge 0 -or $Sessions -or $Disconnect -or $Logoff -or $Message) {
-    if (-not (Test-ShadowSupport)) {
-        Write-Host "RDP shadowing is not properly configured." -ForegroundColor $COLORS.Warning
-    
-    if (-not $Quiet) {
-            $configure = Read-Host "Configure RDP shadowing automatically? (Y/n)"
-            
-            if ($configure -ne 'n') {
-                $configureResult = Enable-RDPShadowing
-                
-                if (-not $configureResult) {
-                    Write-Host "Failed to configure RDP shadowing. Manual configuration may be required." -ForegroundColor $COLORS.Error
-                    
-                    if (-not $Force) {
-                        exit $ERROR_CODES.RegistryAccessDenied
-                    }
-                }
-            }
-        } elseif ($Force) {
-            # Force configuration
-            Enable-RDPShadowing | Out-Null
-        }
+if ($script:Sessions) {
+    Show-SessionsPS7 -ComputerName $script:ComputerName -Quiet:$script:Quiet
+    exit $ERROR_CODES.Success
+}
+
+if ($EnableShadowPermissions) {
+    Write-DebugLog "Processing request to enable maximum shadow permissions" "INFO" @{
+        ComputerName = $ComputerName
+    }
+
+    $ok = Enable-RDPShadowPermissions -ComputerName $ComputerName
+    if ($ok) {
+        Write-Host "RDP shadow permissions enabled: Full Control without user permission." -ForegroundColor $COLORS.Success
+        exit $ERROR_CODES.Success
+    } else {
+        Write-Host "Failed to enable RDP shadow permissions." -ForegroundColor $COLORS.Error
+        exit $ERROR_CODES.RegistryAccessDenied
     }
 }
 
-# Step 7: Handle sessions list request
-if ($Sessions) {
-    Show-SessionsPS7 -HoursBack $HoursBack -ComputerName $ComputerName
-    exit $ERRORCODES.Success
-}
-
-# Step 8: Handle session management operations (disconnect/logoff/message)
-if ($Disconnect -or $Logoff) {
-    if ($SessionId -lt 0) {
+if ($script:Disconnect -or $script:Logoff) {
+    if ($script:SessionId -lt 0) {
         Write-Host "Session ID is required for disconnect/logoff operations." -ForegroundColor $COLORS.Error
         exit $ERROR_CODES.InvalidParameter
     }
-    $result = Disconnect-Session -SessionId $SessionId -Logoff:$Logoff
-    if ($result) { exit $ERROR_CODES.Success } else { exit $ERROR_CODES.ConnectionFailed }
+
+    $result = Disconnect-Session -SessionId $script:SessionId -Logoff:$script:Logoff
+    if ($result) {
+        exit $ERROR_CODES.Success
+    } else {
+        exit $ERROR_CODES.ConnectionFailed
+    }
 }
 
-if ($Message) {
-    if ($SessionId -lt 0) {
+if (-not [string]::IsNullOrWhiteSpace($script:Message)) {
+    if ($script:SessionId -lt 0) {
         Write-Host "Session ID is required for sending messages." -ForegroundColor $COLORS.Error
         exit $ERROR_CODES.InvalidParameter
     }
-    $result = Send-SessionMessage -SessionId $SessionId -Message $Message
-    if ($result) { exit $ERROR_CODES.Success } else { exit $ERROR_CODES.ConnectionFailed }
+
+    $result = Send-SessionMessage -SessionId $script:SessionId -Message $script:Message
+    if ($result) {
+        exit $ERROR_CODES.Success
+    } else {
+        exit $ERROR_CODES.ConnectionFailed
+    }
 }
 
-# Step 9: Handle session connection
-if ($SessionId -ge 0) {
-    Write-DebugLog "Processing connection request to session $SessionId" "INFO"
+if ($script:SessionId -ge 0) {
+    Write-DebugLog "Processing shadow connection request to session $($script:SessionId)" "INFO" @{
+        SessionId    = $script:SessionId
+        ViewOnly     = $script:ViewOnly
+        ComputerName = $script:ComputerName
+    }
 
-    $result = Connect-RDPSession -SessionId $SessionId -ViewOnly $ViewOnly
+    $result =Connect-RDPSession `
+    -SessionId $SessionId `
+    -ViewOnly:$ViewOnly.IsPresent `
+    -ComputerName $ComputerName `
+    -NoConsentPrompt:$NoConsentPrompt.IsPresent
 
     if ($result) {
-        Write-DebugLog "Session connection completed successfully" "SUCCESS"
+        Write-DebugLog "Session shadow connection completed successfully" "SUCCESS"
         exit $ERROR_CODES.Success
     } else {
         Write-DebugLog "Failed to connect to session" "ERROR"
@@ -5932,11 +6523,8 @@ if ($SessionId -ge 0) {
     }
 }
 
-# Step 10: Default action (show help if no parameters)
-if ($PSBoundParameters.Count -eq 0) {
-    Show-Help
-    exit $ERROR_CODES.Success
-}
-
+Show-Help
 Write-DebugLog "Script execution completed" "SUCCESS"
 exit $ERROR_CODES.Success
+
+#endregion
