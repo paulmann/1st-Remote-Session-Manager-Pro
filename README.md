@@ -285,11 +285,13 @@ The security implementation ensures proper authentication and authorization:
 irm https://raw.githubusercontent.com/paulmann/1st-Remote-Session-Manager-Pro/refs/heads/main/1st-Remote-Session-Manager-Pro.ps1 -OutFile 1st-Remote-Session-Manager-Pro.ps1
 irm https://raw.githubusercontent.com/paulmann/1st-Remote-Session-Manager-Pro/refs/heads/main/qwinsta-en.ps1 -OutFile qwinsta-en.ps1
 irm https://raw.githubusercontent.com/paulmann/1st-Remote-Session-Manager-Pro/refs/heads/main/qwinsta_IP_PS7.ps1 -OutFile qwinsta_IP_PS7.ps1
-
+```
+```powershell
 # Method 2: Clone repository
 git clone https://github.com/paulmann/1st-Remote-Session-Manager-Pro.git
 cd 1st-Remote-Session-Manager-Pro
-
+```
+```powershell
 # Method 3: PowerShell Gallery (if published)
 Install-Script -Name 1st-Remote-Session-Manager-Pro
 ```
