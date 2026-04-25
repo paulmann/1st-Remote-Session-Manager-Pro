@@ -16,7 +16,7 @@
 .AUTHOR
     Mikhail Deynekin (Mikhail "paulmann" Deynekin)
     Website: https://deynekin.com
-    Email:   mid1977@gmail.com
+    Email:   rdp@deynekin.com
 
 .VERSION
     1.5.0  (see in-script version history for detailed changelog)
@@ -45,6 +45,18 @@
 
         # Connect to a specific remote host
         .\1st-Remote-Session-Manager-Pro.ps1 -ComputerName "RDPSERVER01"
+
+        # List all active RDP sessions with IP correlation
+        .\1st-Remote-Session-Manager-Pro.ps1 -Sessions
+
+        # Show system status and RDP configuration
+        .\1st-Remote-Session-Manager-Pro.ps1 -Status
+
+        # Connect (shadow) a specific session by ID
+        .\1st-Remote-Session-Manager-Pro.ps1 -SessionId 2
+
+        # Shadow session in view-only mode without consent prompt
+        .\1st-Remote-Session-Manager-Pro.ps1 -SessionId 2 -ViewOnly -NoConsentPrompt
 
 .LICENSE
     See LICENSE file in the GitHub repository for licensing details.
@@ -194,6 +206,7 @@ if (Test-Path $AnalyzerScriptPath) {
 $SCRIPT_NAME = "1st-Remote-Session-Manager-Pro"
 $SCRIPT_VERSION = "1.5.0"
 $SCRIPT_AUTHOR = "Mikhail Deynekin"
+$GITHUB_ROOT = "https://github.com/paulmann/1st-Remote-Session-Manager-Pro"
 $GITHUB_REPO = "https://raw.githubusercontent.com/paulmann/1st-Remote-Session-Manager-Pro"
 $RAW_GITHUB_URL = "https://raw.githubusercontent.com/paulmann/1st-Remote-Session-Manager-Pro/refs/heads/main/1st-Remote-Session-Manager-Pro.ps1"
 
@@ -6961,7 +6974,7 @@ function Restart-ScriptInNewWindow {
 #endregion
 
 function Show-Help {
-    # Display comprehensive help
+    # v1.5.0 - Added -NoConsentPrompt (-ns) and -EnableShadowPermissions (-esp) entries
     $helpText = @"
 REMOTE SESSION MANAGER PRO v$SCRIPT_VERSION
 Advanced RDP session management tool for Windows
@@ -6981,6 +6994,17 @@ PARAMETERS:
     -Disconnect, -x          Disconnect specified session
     -Logoff, -l              Logoff specified session (hard termination)
     -Message, -m <text>      Send message to specified session
+    -NoConsentPrompt, -ns    Skip the consent prompt shown to the remote user
+                             during shadowing; passes /noConsentPrompt to
+                             mstsc.exe. Requires shadow permissions to be
+                             already configured, or combine with -esp.
+    -EnableShadowPermissions, -esp
+                             Configure the local machine for shadow access
+                             without user consent: sets registry Shadow=2
+                             (Full Control / No Consent), opens RDP firewall
+                             rules, sets RDP services to Automatic, and runs
+                             gpupdate. Use once before first shadow session.
+                             CAUTION: modifies registry and firewall settings.
     -ComputerName, -c <name> Target computer (default: localhost)
     -Quiet, -q               Quiet mode (minimal output)
     -Force, -f               Force operations without confirmation
@@ -6998,6 +7022,16 @@ EXAMPLES:
 
     # Connect to session ID 3 in view-only mode
     .\$SCRIPT_NAME.ps1 -SessionId 3 -ViewOnly
+
+    # Connect to session ID 2 without showing consent prompt to remote user
+    .\$SCRIPT_NAME.ps1 -SessionId 2 -NoConsentPrompt
+
+    # One-time setup: configure shadow permissions, then connect silently
+    .\$SCRIPT_NAME.ps1 -EnableShadowPermissions
+    .\$SCRIPT_NAME.ps1 -SessionId 2 -NoConsentPrompt
+
+    # Setup and connect in a single command
+    .\$SCRIPT_NAME.ps1 -EnableShadowPermissions -SessionId 2 -NoConsentPrompt
 
     # Disconnect session ID 4
     .\$SCRIPT_NAME.ps1 -SessionId 4 -Disconnect
@@ -7026,14 +7060,35 @@ EXAMPLES:
 NOTES:
     - Administrative privileges are required for most operations
     - Session IDs can be obtained using the -Sessions parameter
+    - -EnableShadowPermissions writes to HKLM registry, modifies Windows
+      Firewall rules and configures TermService/SessionEnv/UmRdpService;
+      run once on the target machine before shadowing, then reuse -ns only
+    - -NoConsentPrompt requires shadow permissions already configured;
+      if not yet configured, combine with -EnableShadowPermissions first
+    - Shadow mode set by -esp: 2 = Full Control without user permission
     - First run may require RDP shadowing to be configured automatically
 
 AUTHOR:
     $SCRIPT_AUTHOR
-    GitHub: $GITHUB_REPO
+    GitHub: $GITHUB_ROOT
 "@
-    
+
     Write-Host $helpText -ForegroundColor $COLORS.Info
+}
+
+function Show-Version {
+    $winCaption = (Get-WindowsVersion).Caption
+    $isAdmin    = Test-IsAdministrator
+    $versionInfo = @"
+Remote Session Manager Pro v$SCRIPT_VERSION
+Author: $SCRIPT_AUTHOR
+GitHub: $GITHUB_REPO
+PowerShell: $($PSVersionTable.PSVersion)
+Windows: $winCaption
+Administrator: $isAdmin
+"@
+
+    Write-Host $versionInfo -ForegroundColor $COLORS.Info
 }
 
 function Show-Version {
